@@ -4,6 +4,8 @@ import { Navbar } from './components/Navbar';
 import { ProtectedRoute } from './components/ProtectedRoute';
 import { Home } from './pages/Home';
 import { Login } from './pages/Login';
+import { ForgotPassword } from './pages/ForgotPassword.tsx';
+import { ResetPassword } from './pages/ResetPassword.tsx';
 import { Register } from './pages/Register';
 import { PublicRegister } from './pages/PublicRegister';
 import { Dashboard } from './pages/Dashboard';
@@ -24,6 +26,8 @@ function App() {
           <Routes>
             <Route path="/" element={<Home />} />
             <Route path="/login" element={<Login />} />
+            <Route path="/forgot-password" element={<ForgotPassword />} />
+            <Route path="/reset-password" element={<ResetPassword />} />
             <Route path="/register" element={<Register />} />
             <Route path="/register/public" element={<PublicRegister />} />
             <Route path="/projects" element={<Projects />} />
@@ -38,6 +42,14 @@ function App() {
             />
             <Route
               path="/submit"
+              element={
+                <ProtectedRoute allowedRoles={['student']}>
+                  <SubmitProject />
+                </ProtectedRoute>
+              }
+            />
+            <Route
+              path="/submit/:id"
               element={
                 <ProtectedRoute allowedRoles={['student']}>
                   <SubmitProject />

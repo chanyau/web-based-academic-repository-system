@@ -5,3 +5,10 @@ django-cors-headers
 mysqlclient
 pymysql
 python-dotenv
+PyPDF2
+python-docx
+docx2txt
+pdfplumber
+google-auth
+google-auth-oauthlib
+google-api-python-client

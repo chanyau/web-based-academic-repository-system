@@ -7,8 +7,25 @@ from .models import Project, Message
 from .serializers import UserSerializer, ProjectSerializer, CustomTokenObtainPairSerializer, MessageSerializer
 from rest_framework_simplejwt.views import TokenObtainPairView
 from datetime import datetime
+import os
+from django.conf import settings
+from django.core.mail import send_mail
+from django.contrib.auth.password_validation import validate_password
+from django.contrib.auth.tokens import PasswordResetTokenGenerator
+from django.utils.http import urlsafe_base64_encode, urlsafe_base64_decode
+from django.utils.encoding import force_bytes, force_str
+import logging
+from .email_utils import (
+    notify_project_submission,
+    notify_project_approved,
+    notify_project_rejected,
+    notify_new_message,
+    notify_project_under_review,
+    notify_admin_project_ready_for_review
+)
 
 User = get_user_model()
+logger = logging.getLogger(__name__)
 
 class IsAdmin(permissions.BasePermission):
     def has_permission(self, request, view):
@@ -66,9 +83,24 @@ class ProjectViewSet(viewsets.ModelViewSet):
             queryset = queryset.filter(supervisor_id=supervisor_id)
             
         return queryset.order_by('-submitted_at')
+    
+    def retrieve(self, request, *args, **kwargs):
+        """Get a single project and increment view count"""
+        instance = self.get_object()
+        # Increment view count
+        instance.views = (instance.views or 0) + 1
+        instance.save(update_fields=['views'])
+        serializer = self.get_serializer(instance)
+        return Response(serializer.data)
 
     def perform_create(self, serializer):
-        serializer.save(owner=self.request.user, status='pending')
+        project = serializer.save(owner=self.request.user, status='pending')
+        # Send email notifications to student and supervisor
+        try:
+            notify_project_submission(project)
+        except Exception as e:
+            import logging
+            logging.getLogger(__name__).error(f"Failed to send submission notification: {e}")
 
     def perform_update(self, serializer):
         # Students can only edit their own projects if status is pending or revision_requested
@@ -96,6 +128,13 @@ class ProjectViewSet(viewsets.ModelViewSet):
             # Lecturer recommends for publishing - status becomes 'under_review'
             project.status = 'under_review'
             project.save()
+            # Notify student that supervisor has approved
+            try:
+                notify_project_under_review(project, feedback)
+                notify_admin_project_ready_for_review(project, feedback)
+            except Exception as e:
+                import logging
+                logging.getLogger(__name__).error(f"Failed to send under_review notification: {e}")
             return Response({
                 'status': 'under_review',
                 'message': 'Project approved by supervisor. Awaiting admin to publish.',
@@ -105,6 +144,12 @@ class ProjectViewSet(viewsets.ModelViewSet):
             # Admin can also approve directly (publish)
             project.status = 'approved'
             project.save()
+            # Notify student that project is approved
+            try:
+                notify_project_approved(project, feedback)
+            except Exception as e:
+                import logging
+                logging.getLogger(__name__).error(f"Failed to send approval notification: {e}")
             return Response({
                 'status': 'approved',
                 'message': 'Project has been published and is now publicly available.'
@@ -125,6 +170,25 @@ class ProjectViewSet(viewsets.ModelViewSet):
         
         project.status = 'revision_requested'
         project.save()
+        # Notify student about rejection
+        try:
+            notify_project_rejected(project, feedback)
+        except Exception as e:
+            import logging
+            logging.getLogger(__name__).error(f"Failed to send rejection notification: {e}")
+
+        # Create in-app message so student sees supervisor guidance in Messages
+        if request.user.role == 'lecturer' and feedback:
+            try:
+                review_message = Message.objects.create(
+                    project=project,
+                    sender=request.user,
+                    content=f"Review feedback: {feedback}"
+                )
+                notify_new_message(review_message)
+            except Exception as e:
+                import logging
+                logging.getLogger(__name__).error(f"Failed to send review message notification: {e}")
         
         return Response({
             'status': 'revision_requested',
@@ -146,6 +210,25 @@ class ProjectViewSet(viewsets.ModelViewSet):
         
         project.status = 'revision_requested'
         project.save()
+        # Notify student about revision request
+        try:
+            notify_project_rejected(project, feedback)
+        except Exception as e:
+            import logging
+            logging.getLogger(__name__).error(f"Failed to send revision notification: {e}")
+
+        # Create in-app message so student sees supervisor guidance in Messages
+        if request.user.role == 'lecturer' and feedback:
+            try:
+                review_message = Message.objects.create(
+                    project=project,
+                    sender=request.user,
+                    content=f"Revision request: {feedback}"
+                )
+                notify_new_message(review_message)
+            except Exception as e:
+                import logging
+                logging.getLogger(__name__).error(f"Failed to send revision message notification: {e}")
         
         return Response({
             'status': 'revision_requested',
@@ -159,6 +242,12 @@ class ProjectViewSet(viewsets.ModelViewSet):
         project = self.get_object()
         project.status = 'approved'
         project.save()
+        # Notify student that project is published
+        try:
+            notify_project_approved(project, 'Your project has been published and is now publicly available.')
+        except Exception as e:
+            import logging
+            logging.getLogger(__name__).error(f"Failed to send publish notification: {e}")
         return Response({
             'status': 'approved',
             'message': 'Project published successfully'
@@ -171,6 +260,30 @@ class ProjectViewSet(viewsets.ModelViewSet):
         project.status = 'archived'
         project.save()
         return Response({'status': 'archived'})
+
+    @action(detail=True, methods=['post'], permission_classes=[IsAdmin])
+    def unpublish(self, request, pk=None):
+        """Unpublish an approved project back to under_review"""
+        project = self.get_object()
+
+        if project.status != 'approved':
+            return Response({'error': 'Only published projects can be unpublished'}, status=400)
+
+        project.status = 'under_review'
+        project.save()
+        return Response({'status': 'under_review', 'message': 'Project unpublished and moved back to under review'})
+
+    @action(detail=True, methods=['post'], permission_classes=[IsAdmin])
+    def unarchive(self, request, pk=None):
+        """Restore an archived project back to under_review"""
+        project = self.get_object()
+
+        if project.status != 'archived':
+            return Response({'error': 'Only archived projects can be unarchived'}, status=400)
+
+        project.status = 'under_review'
+        project.save()
+        return Response({'status': 'under_review', 'message': 'Project unarchived and moved to under review'})
 
     @action(detail=True, methods=['get'])
     def citation(self, request, pk=None):
@@ -240,6 +353,12 @@ class ProjectViewSet(viewsets.ModelViewSet):
                 sender=user,
                 content=content
             )
+            # Send email notification to recipient
+            try:
+                notify_new_message(message)
+            except Exception as e:
+                import logging
+                logging.getLogger(__name__).error(f"Failed to send message notification: {e}")
             serializer = MessageSerializer(message)
             return Response(serializer.data, status=201)
 
@@ -252,6 +371,35 @@ class ProjectViewSet(viewsets.ModelViewSet):
         # Count messages not sent by the current user and not read
         count = project.messages.filter(is_read=False).exclude(sender=user).count()
         return Response({'unread_count': count})
+
+    @action(detail=True, methods=['post'], permission_classes=[permissions.IsAuthenticated])
+    def resubmit(self, request, pk=None):
+        """Student resubmits the same project after revision request."""
+        project = self.get_object()
+        user = request.user
+
+        if user.role != 'student':
+            return Response({'error': 'Only students can resubmit projects'}, status=403)
+
+        if project.owner != user:
+            return Response({'error': 'You can only resubmit your own projects'}, status=403)
+
+        if project.status != 'revision_requested':
+            return Response({'error': 'Only revision-requested projects can be resubmitted'}, status=400)
+
+        project.status = 'pending'
+        project.save(update_fields=['status'])
+
+        try:
+            notify_project_submission(project)
+        except Exception as e:
+            import logging
+            logging.getLogger(__name__).error(f"Failed to send resubmission notification: {e}")
+
+        return Response({
+            'status': 'pending',
+            'message': 'Project resubmitted successfully and sent back to your supervisor for review.'
+        })
 
 @api_view(['GET'])
 @permission_classes([permissions.AllowAny])
@@ -389,51 +537,271 @@ def register(request):
 
 
 @api_view(['POST'])
+@permission_classes([permissions.AllowAny])
+def forgot_password(request):
+    email = (request.data.get('email') or '').strip()
+
+    if not email:
+        return Response({'message': 'Email is required.'}, status=400)
+
+    generic_response = {
+        'message': 'If an account with that email exists, a password reset link has been sent.'
+    }
+
+    user = User.objects.filter(email__iexact=email).first()
+    if not user:
+        return Response(generic_response, status=200)
+
+    try:
+        token_generator = PasswordResetTokenGenerator()
+        uid = urlsafe_base64_encode(force_bytes(user.pk))
+        token = token_generator.make_token(user)
+
+        frontend_base_url = os.getenv('FRONTEND_URL', 'http://localhost:5173').rstrip('/')
+        reset_link = f"{frontend_base_url}/reset-password?uid={uid}&token={token}"
+
+        send_mail(
+            subject='Password Reset Request',
+            message=(
+                'You requested a password reset for your Academic Repository account.\n\n'
+                f'Use the link below to reset your password:\n{reset_link}\n\n'
+                'If you did not request this, you can safely ignore this email.'
+            ),
+            from_email=settings.DEFAULT_FROM_EMAIL,
+            recipient_list=[user.email],
+            fail_silently=False,
+        )
+    except Exception as exc:
+        logger.error(f"Failed to send password reset email for {email}: {exc}")
+
+    return Response(generic_response, status=200)
+
+
+@api_view(['POST'])
+@permission_classes([permissions.AllowAny])
+def reset_password(request):
+    uid = (request.data.get('uid') or '').strip()
+    token = (request.data.get('token') or '').strip()
+    password = request.data.get('password') or ''
+
+    if not uid or not token or not password:
+        return Response({'message': 'uid, token, and password are required.'}, status=400)
+
+    try:
+        user_id = force_str(urlsafe_base64_decode(uid))
+        user = User.objects.get(pk=user_id)
+    except Exception:
+        return Response({'message': 'Invalid or expired password reset link.'}, status=400)
+
+    token_generator = PasswordResetTokenGenerator()
+    if not token_generator.check_token(user, token):
+        return Response({'message': 'Invalid or expired password reset link.'}, status=400)
+
+    try:
+        validate_password(password, user=user)
+    except Exception as exc:
+        return Response({'message': str(exc)}, status=400)
+
+    user.set_password(password)
+    user.save(update_fields=['password'])
+
+    return Response({'message': 'Password reset successful. You can now log in with your new password.'}, status=200)
+
+
+@api_view(['POST'])
 @permission_classes([permissions.IsAuthenticated])
 def extract_keywords(request):
     """
-    Extract keywords from abstract text using AI/NLP.
-    This endpoint can be called by students during project submission
-    to get keyword suggestions based on their abstract.
+    Extract keywords from uploaded document using AI/NLP.
+    This endpoint accepts file uploads (PDF/DOCX) and extracts keywords from the document content.
     """
-    abstract = request.data.get('abstract', '')
-    existing_keywords = request.data.get('existing_keywords', [])
+    import tempfile
+    import os
+    import logging
+    logger = logging.getLogger(__name__)
     
-    if not abstract or len(abstract.strip()) < 50:
+    uploaded_file = request.FILES.get('file', None)
+    existing_keywords = request.POST.getlist('existing_keywords', [])
+    abstract_text = (request.POST.get('abstract_text') or '').strip()
+    title_text = (request.POST.get('title_text') or '').strip()
+    
+    if not uploaded_file:
         return Response({
-            'error': 'Abstract must be at least 50 characters long',
+            'error': 'Please upload a document to extract keywords',
             'keywords': []
         }, status=400)
     
     try:
-        from .nlp_utils import extract_keywords_from_project, suggest_keywords
+        from .nlp_utils import extract_text_from_file, extract_keywords_simple
         
-        # Extract keywords from abstract
-        keywords = extract_keywords_from_project(abstract, file_path=None, top_n=10)
+        # Check file extension
+        ext = os.path.splitext(uploaded_file.name)[1].lower()
+        if ext not in ['.pdf', '.docx', '.doc']:
+            return Response({
+                'error': 'Unsupported file type. Please upload PDF or DOCX files.',
+                'keywords': []
+            }, status=400)
+
+        if ext == '.doc':
+            return Response({
+                'error': 'Legacy .doc files are not supported for AI keyword extraction. Please save and upload as .docx.',
+                'keywords': []
+            }, status=400)
         
-        # If user already has some keywords, suggest additional ones
-        if existing_keywords:
-            suggestions = suggest_keywords(abstract, existing_keywords, top_n=5)
+        # Save to temp file
+        temp_file = tempfile.NamedTemporaryFile(delete=False, suffix=ext)
+        for chunk in uploaded_file.chunks():
+            temp_file.write(chunk)
+        temp_file.close()
+        temp_file_path = temp_file.name
+        
+        try:
+            # Extract text from uploaded file
+            document_text = extract_text_from_file(temp_file_path)
+            logger.info(f"Extracted {len(document_text)} chars from {uploaded_file.name}")
+            
+            extraction_source = 'document'
+            extraction_notice = None
+
+            if not document_text or len(document_text.strip()) < 20:
+                fallback_text = "\n\n".join(part for part in [title_text, abstract_text] if part)
+                if len(fallback_text.strip()) >= 20:
+                    document_text = fallback_text
+                    extraction_source = 'abstract'
+                    extraction_notice = 'Could not extract enough text from uploaded file. Keywords were generated from your title/abstract instead.'
+                else:
+                    if ext == '.pdf':
+                        extraction_error = f'Could not extract text from the PDF ({len(document_text)} characters found). This may be a scanned PDF. Try uploading a text-based PDF or provide abstract text.'
+                    else:
+                        extraction_error = f'Could not extract text from the Word document ({len(document_text)} characters found). Please ensure the .docx contains selectable text or provide abstract text.'
+
+                    return Response({
+                        'error': extraction_error,
+                        'keywords': []
+                    }, status=400)
+            
+            # Extract keywords from the text
+            keywords = extract_keywords_simple(document_text, top_n=10)
+            logger.info(f"Extracted keywords: {keywords}")
+            
+            # Filter out existing keywords from suggestions
+            if existing_keywords:
+                keywords = [k for k in keywords if k.lower() not in [e.lower() for e in existing_keywords]]
+            
+            if not keywords:
+                return Response({
+                    'error': 'Could not extract meaningful keywords. The document may contain mostly common words.',
+                    'keywords': []
+                }, status=400)
+            
             return Response({
                 'keywords': keywords,
-                'suggestions': suggestions,
-                'message': 'Keywords extracted successfully'
+                'message': 'Keywords extracted successfully from document' if extraction_source == 'document' else extraction_notice,
+                'source': extraction_source
             })
-        
-        return Response({
-            'keywords': keywords,
-            'message': 'Keywords extracted successfully'
-        })
+        finally:
+            # Clean up temp file
+            if os.path.exists(temp_file_path):
+                os.unlink(temp_file_path)
     
     except Exception as e:
-        import logging
-        logger = logging.getLogger(__name__)
-        logger.error(f"Error extracting keywords: {e}")
+        import traceback
+        logger.error(f"Error extracting keywords: {e}\n{traceback.format_exc()}")
         return Response({
-            'error': 'Failed to extract keywords. Please try again or enter keywords manually.',
+            'error': f'Failed to extract keywords: {str(e)}',
             'keywords': []
         }, status=500)
 
 
 class CustomTokenObtainPairView(TokenObtainPairView):
     serializer_class = CustomTokenObtainPairSerializer
+
+
+@api_view(['POST'])
+@permission_classes([permissions.IsAuthenticated])
+def check_similarity(request):
+    """
+    Check similarity score by comparing input project text against existing projects.
+    Supports file upload and/or title+abstract fallback text.
+    """
+    import tempfile
+    import os
+    import logging
+    logger = logging.getLogger(__name__)
+
+    uploaded_file = request.FILES.get('file', None)
+    abstract_text = (request.POST.get('abstract_text') or '').strip()
+    title_text = (request.POST.get('title_text') or '').strip()
+    current_project_id = request.POST.get('current_project_id')
+
+    try:
+        from .nlp_utils import (
+            extract_text_from_file,
+            compute_similarity_report,
+            call_winston_similarity,
+            compute_hybrid_similarity
+        )
+
+        base_text = "\n\n".join(part for part in [title_text, abstract_text] if part).strip()
+        extracted_text = ""
+        temp_file_path = None
+
+        if uploaded_file:
+            ext = os.path.splitext(uploaded_file.name)[1].lower()
+            if ext not in ['.pdf', '.docx', '.doc']:
+                return Response({
+                    'error': 'Unsupported file type. Please upload PDF or DOCX files.'
+                }, status=400)
+
+            if ext == '.doc':
+                return Response({
+                    'error': 'Legacy .doc files are not supported for similarity check. Please upload .docx.'
+                }, status=400)
+
+            temp_file = tempfile.NamedTemporaryFile(delete=False, suffix=ext)
+            for chunk in uploaded_file.chunks():
+                temp_file.write(chunk)
+            temp_file.close()
+            temp_file_path = temp_file.name
+
+            extracted_text = extract_text_from_file(temp_file_path)
+
+        input_text = "\n\n".join(part for part in [base_text, extracted_text] if part).strip()
+
+        if not input_text or len(input_text) < 20:
+            return Response({
+                'error': 'Insufficient text for similarity check. Provide abstract/title or a readable file.'
+            }, status=400)
+
+        comparison_projects = Project.objects.exclude(status='archived')
+        if current_project_id:
+            comparison_projects = comparison_projects.exclude(id=current_project_id)
+
+        report = compute_similarity_report(input_text, comparison_projects, top_k=5)
+        winston_result = call_winston_similarity(input_text)
+        hybrid_result = compute_hybrid_similarity(
+            local_score=report['similarity_score'],
+            winston_score=winston_result.get('score'),
+            local_top_matches=report['top_matches']
+        )
+
+        return Response({
+            'similarity_score': hybrid_result['similarity_score'],
+            'top_matches': hybrid_result['top_matches'],
+            'method': hybrid_result['method'],
+            'components': hybrid_result['components'],
+            'winston_status': 'used' if winston_result.get('score') is not None else 'fallback_local_only',
+            'winston_error': winston_result.get('error'),
+            'message': 'Hybrid similarity check completed successfully' if hybrid_result['method'] == 'hybrid_local_winston' else 'Local similarity check completed (Winston unavailable)'
+        })
+
+    except Exception as e:
+        import traceback
+        logger.error(f"Error in similarity check: {e}\n{traceback.format_exc()}")
+        return Response({'error': f'Failed to check similarity: {str(e)}'}, status=500)
+    finally:
+        try:
+            if 'temp_file_path' in locals() and temp_file_path and os.path.exists(temp_file_path):
+                os.unlink(temp_file_path)
+        except Exception:
+            pass

@@ -1,5 +1,5 @@
 import { useState, useEffect } from 'react';
-import { useParams, Link } from 'react-router-dom';
+import { useParams, Link, useNavigate } from 'react-router-dom';
 import {
   Download,
   Eye,
@@ -7,7 +7,6 @@ import {
   User,
   Tag,
   Building,
-  FileText,
   TrendingUp,
   ArrowLeft,
   Share2,
@@ -21,6 +20,7 @@ import { Project } from '../types';
 
 export const ProjectDetail = () => {
   const { id } = useParams();
+  const navigate = useNavigate();
   const { user } = useAuth();
   const isPublicUser = user?.role === 'public';
 
@@ -90,10 +90,12 @@ export const ProjectDetail = () => {
 
   const authors = Array.isArray(project.authors) ? project.authors : [project.authors];
   const keywords = Array.isArray(project.keywords) ? project.keywords : [];
+  const isStudentOwner = user?.role === 'student' && String(user?.id ?? '') === String(project.ownerId ?? '');
+  const canContinueSubmission = project.status !== 'approved' && project.status !== 'archived';
 
   return (
     <div className="min-h-screen bg-gradient-to-br from-blue-50 to-white">
-      <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
+      <div className="max-w-full mx-auto px-4 sm:px-6 lg:px-12 py-8">
         <Link
           to="/projects"
           className="inline-flex items-center space-x-2 text-blue-600 hover:text-blue-700 mb-6"
@@ -102,8 +104,8 @@ export const ProjectDetail = () => {
           <span>Back to Projects</span>
         </Link>
 
-        <div className="grid lg:grid-cols-3 gap-8">
-          <div className="lg:col-span-2 space-y-6">
+        <div className="max-w-5xl mx-auto">
+          <div className="space-y-6">
             <div className="bg-white rounded-xl shadow-lg p-8">
               <div className="flex items-start justify-between mb-4">
                 <div className="flex-1">
@@ -183,6 +185,17 @@ export const ProjectDetail = () => {
                 </button>
               </div>
 
+              {isStudentOwner && canContinueSubmission && (
+                <div className="mb-6">
+                  <button
+                    onClick={() => navigate(`/submit/${project.id}`)}
+                    className="inline-flex items-center space-x-2 px-6 py-3 bg-blue-900 text-white rounded-lg hover:bg-blue-800 transition-colors font-medium"
+                  >
+                    <span>{project.status === 'revision_requested' ? 'Resubmit Project' : 'Continue Submission'}</span>
+                  </button>
+                </div>
+              )}
+
               <div className="space-y-6">
                 <div>
                   <h2 className="text-xl font-bold text-gray-900 mb-3">Abstract</h2>
@@ -219,7 +232,13 @@ export const ProjectDetail = () => {
                       </div>
                       <div>
                         <span className="text-gray-600">Submitted:</span>
-                        <span className="ml-2 text-gray-900 font-medium">{project.submittedAt}</span>
+                        <span className="ml-2 text-gray-900 font-medium">
+                          {project.submittedAt ? new Date(project.submittedAt).toLocaleDateString('en-US', { 
+                            year: 'numeric', 
+                            month: 'long', 
+                            day: 'numeric' 
+                          }) : 'N/A'}
+                        </span>
                       </div>
                     </div>
                   </div>
@@ -244,7 +263,7 @@ export const ProjectDetail = () => {
                   </div>
                 )}
 
-                {project.similarityScore !== undefined && project.similarityScore !== null && (
+                {project.status !== 'approved' && project.similarityScore !== undefined && project.similarityScore !== null && (
                   <div className="pt-6 border-t border-gray-200">
                     <div className="bg-gradient-to-br from-green-50 to-green-100 rounded-lg p-6 border border-green-200">
                       <h3 className="text-sm font-semibold text-gray-900 mb-3 flex items-center space-x-2">
@@ -272,43 +291,6 @@ export const ProjectDetail = () => {
                   </div>
                 )}
               </div>
-            </div>
-          </div>
-
-          <div className="space-y-6">
-            <div className="bg-white rounded-xl shadow-lg p-6">
-              <h2 className="text-xl font-bold text-gray-900 mb-4 flex items-center space-x-2">
-                <FileText className="h-5 w-5 text-blue-600" />
-                <span>Quick Stats</span>
-              </h2>
-              <div className="space-y-4">
-                <div className="flex items-center justify-between pb-3 border-b border-gray-100">
-                  <span className="text-gray-600 text-sm">Total Views</span>
-                  <span className="text-gray-900 font-semibold">{project.views || 0}</span>
-                </div>
-                <div className="flex items-center justify-between pb-3 border-b border-gray-100">
-                  <span className="text-gray-600 text-sm">Downloads</span>
-                  <span className="text-gray-900 font-semibold">{project.downloads || 0}</span>
-                </div>
-                <div className="flex items-center justify-between pb-3 border-b border-gray-100">
-                  <span className="text-gray-600 text-sm">Status</span>
-                  <span className="text-green-600 font-semibold capitalize">{project.status}</span>
-                </div>
-                <div className="flex items-center justify-between">
-                  <span className="text-gray-600 text-sm">Year</span>
-                  <span className="text-gray-900 font-semibold">{project.year}</span>
-                </div>
-              </div>
-            </div>
-
-            <div className="bg-gradient-to-br from-blue-600 to-blue-700 rounded-xl shadow-lg p-6 text-white">
-              <h3 className="text-lg font-bold mb-2">Need Help?</h3>
-              <p className="text-blue-100 text-sm mb-4">
-                Contact the repository administrator for assistance or to report any issues.
-              </p>
-              <button className="w-full bg-white text-blue-600 py-2 rounded-lg hover:bg-blue-50 transition-colors font-medium text-sm">
-                Contact Support
-              </button>
             </div>
           </div>
         </div>

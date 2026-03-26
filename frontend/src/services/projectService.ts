@@ -1,5 +1,5 @@
 import { apiClient } from './api';
-import { Project } from '../types';
+import { Project, ProjectStageProgress, ProjectStageCode, WorkflowDetails, DevelopmentSubmission } from '../types';
 
 export interface ProjectSearchParams {
   query?: string;
@@ -16,6 +16,39 @@ export interface Lecturer {
   email: string;
   faculty?: string;
   department?: string;
+}
+
+export interface SimilarityCheckResult {
+  similarity_score: number;
+  top_matches: Array<{
+    project_id: string | number;
+    title: string;
+    similarity: number;
+  }>;
+  method?: 'local_cosine_only' | 'hybrid_local_winston';
+  components?: {
+    local_score: number;
+    winston_score: number | null;
+    weights: {
+      local: number;
+      winston: number;
+    };
+  };
+  winston_status?: 'used' | 'fallback_local_only';
+  winston_error?: string | null;
+  message?: string;
+}
+
+export interface StageReviewPayload {
+  stage: ProjectStageCode;
+  feedback: string;
+  review_status: 'approved' | 'revision_requested';
+}
+
+export interface FinalSubmitPayload {
+  finalReport: File;
+  sourceCode?: File;
+  supportingDocuments?: File;
 }
 
 export const projectService = {
@@ -105,6 +138,10 @@ export const projectService = {
     return apiClient.post<Project>(`/projects/${id}/submit`);
   },
 
+  async resubmitProject(id: string): Promise<any> {
+    return apiClient.post(`/projects/${id}/resubmit/`);
+  },
+
   async approveProject(id: string, feedback?: string): Promise<any> {
     return apiClient.post(`/projects/${id}/approve/`, { feedback });
   },
@@ -123,6 +160,14 @@ export const projectService = {
 
   async archiveProject(id: string): Promise<any> {
     return apiClient.post(`/projects/${id}/archive/`);
+  },
+
+  async unpublishProject(id: string): Promise<any> {
+    return apiClient.post(`/projects/${id}/unpublish/`);
+  },
+
+  async unarchiveProject(id: string): Promise<any> {
+    return apiClient.post(`/projects/${id}/unarchive/`);
   },
 
   async getCitation(id: string): Promise<any> {
@@ -187,13 +232,86 @@ export const projectService = {
   },
 
   /**
-   * Extract keywords from abstract using AI/NLP
+   * Extract keywords from uploaded document using AI/NLP
    */
-  async extractKeywords(abstract: string, existingKeywords?: string[]): Promise<{ keywords: string[]; suggestions?: string[]; message?: string }> {
-    return apiClient.post<{ keywords: string[]; suggestions?: string[]; message?: string }>('/extract-keywords/', {
-      abstract,
-      existing_keywords: existingKeywords || []
-    });
+  async extractKeywords(file: File, existingKeywords?: string[], abstractText?: string, titleText?: string): Promise<{ keywords: string[]; suggestions?: string[]; message?: string; source?: string }> {
+    const formData = new FormData();
+    formData.append('file', file);
+    if (existingKeywords && existingKeywords.length > 0) {
+      existingKeywords.forEach(k => formData.append('existing_keywords', k));
+    }
+    if (abstractText) {
+      formData.append('abstract_text', abstractText);
+    }
+    if (titleText) {
+      formData.append('title_text', titleText);
+    }
+    return apiClient.postFormData<{ keywords: string[]; suggestions?: string[]; message?: string; source?: string }>('/extract-keywords/', formData);
+  },
+
+  async checkSimilarity(file?: File, abstractText?: string, titleText?: string, currentProjectId?: string): Promise<SimilarityCheckResult> {
+    const formData = new FormData();
+    if (file) {
+      formData.append('file', file);
+    }
+    if (abstractText) {
+      formData.append('abstract_text', abstractText);
+    }
+    if (titleText) {
+      formData.append('title_text', titleText);
+    }
+    if (currentProjectId) {
+      formData.append('current_project_id', currentProjectId);
+    }
+    return apiClient.postFormData<SimilarityCheckResult>('/check-similarity/', formData);
+  },
+
+  async getProjectStageProgress(projectId: string): Promise<ProjectStageProgress[]> {
+    return apiClient.get<ProjectStageProgress[]>(`/projects/${projectId}/stage_progress/`);
+  },
+
+  async submitProjectStage(projectId: string, stage: ProjectStageCode, file: File, studentNote?: string): Promise<ProjectStageProgress> {
+    const formData = new FormData();
+    formData.append('stage', stage);
+    formData.append('file', file);
+    if (studentNote) {
+      formData.append('student_note', studentNote);
+    }
+    return apiClient.postFormData<ProjectStageProgress>(`/projects/${projectId}/submit_stage/`, formData);
+  },
+
+  async reviewProjectStage(projectId: string, payload: StageReviewPayload): Promise<ProjectStageProgress> {
+    return apiClient.post<ProjectStageProgress>(`/projects/${projectId}/review_stage/`, payload);
+  },
+
+  async getWorkflowDetails(projectId: string): Promise<WorkflowDetails> {
+    return apiClient.get<WorkflowDetails>(`/projects/${projectId}/workflow_details/`);
+  },
+
+  async uploadDevelopmentSubmission(projectId: string, submissionType: 'progress_report' | 'chapter' | 'code', file: File, comment?: string): Promise<DevelopmentSubmission> {
+    const formData = new FormData();
+    formData.append('submission_type', submissionType);
+    formData.append('file', file);
+    if (comment) formData.append('comment', comment);
+    return apiClient.postFormData<DevelopmentSubmission>(`/projects/${projectId}/upload_development/`, formData);
+  },
+
+  async submitFinal(projectId: string, payload: FinalSubmitPayload): Promise<any> {
+    const formData = new FormData();
+    formData.append('final_report', payload.finalReport);
+    if (payload.sourceCode) {
+      formData.append('source_code', payload.sourceCode);
+    }
+    if (payload.supportingDocuments) {
+      formData.append('supporting_documents', payload.supportingDocuments);
+    }
+    return apiClient.postFormData<any>(`/projects/${projectId}/submit_final/`, formData);
+  },
+
+  async uploadChaptersBundle(projectId: string, file: File): Promise<any> {
+    const formData = new FormData();
+    formData.append('file', file);
+    return apiClient.postFormData<any>(`/projects/${projectId}/upload_chapters_bundle/`, formData);
   },
 };
 

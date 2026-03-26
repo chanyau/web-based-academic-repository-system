@@ -44,10 +44,27 @@ class ProjectSerializer(serializers.ModelSerializer):
     owner = UserSerializer(read_only=True)
     supervisor = UserSerializer(read_only=True)
     supervisor_id = serializers.IntegerField(write_only=True, required=False, allow_null=True)
+    # Map snake_case to camelCase for frontend compatibility
+    submittedAt = serializers.DateField(source='submitted_at', read_only=True)
+    supervisorId = serializers.IntegerField(source='supervisor.id', read_only=True, allow_null=True)
+    supervisorName = serializers.SerializerMethodField()
+    ownerId = serializers.IntegerField(source='owner.id', read_only=True, allow_null=True)
+    similarityScore = serializers.IntegerField(source='similarity_score', read_only=True, allow_null=True)
+    fileUrl = serializers.SerializerMethodField()
 
     class Meta:
         model = Project
         fields = '__all__'
+    
+    def get_supervisorName(self, obj):
+        if obj.supervisor:
+            return f"{obj.supervisor.first_name} {obj.supervisor.last_name}".strip() or obj.supervisor.username
+        return None
+    
+    def get_fileUrl(self, obj):
+        if obj.file:
+            return obj.file.url
+        return None
     
     def create(self, validated_data):
         supervisor_id = validated_data.pop('supervisor_id', None)

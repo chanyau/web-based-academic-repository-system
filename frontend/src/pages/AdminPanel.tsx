@@ -88,6 +88,26 @@ export const AdminPanel = () => {
     }
   };
 
+  const handleUnpublishProject = async (projectId: string) => {
+    try {
+      await projectService.unpublishProject(projectId);
+      await fetchData();
+    } catch (err) {
+      console.error('Error unpublishing project:', err);
+      alert('Failed to unpublish project. Please try again.');
+    }
+  };
+
+  const handleUnarchiveProject = async (projectId: string) => {
+    try {
+      await projectService.unarchiveProject(projectId);
+      await fetchData();
+    } catch (err) {
+      console.error('Error unarchiving project:', err);
+      alert('Failed to unarchive project. Please try again.');
+    }
+  };
+
   const handleDownloadProject = async (project: Project) => {
     try {
       await projectService.downloadProject(project);
@@ -110,6 +130,36 @@ export const AdminPanel = () => {
 
   const publicUsers = users.filter(u => u.role === 'public');
   const pendingProjects = projects.filter(p => p.status === 'under_review');
+  const publishedProjects = projects.filter(p => p.status === 'approved');
+  const archivedProjects = projects.filter(p => p.status === 'archived');
+
+  const getUserStatusBadge = (user: User) => {
+    if (user.role === 'public') {
+      return {
+        label: user.admitted ? 'Admitted' : 'Pending',
+        className: user.admitted ? 'bg-green-100 text-green-800' : 'bg-yellow-100 text-yellow-800'
+      };
+    }
+
+    return {
+      label: 'Active',
+      className: 'bg-blue-100 text-blue-800'
+    };
+  };
+
+  const getUserDisplayName = (user: User) => {
+    if (user.name && user.name.trim()) return user.name;
+
+    const firstName = user.first_name?.trim() || '';
+    const lastName = user.last_name?.trim() || '';
+    const fullName = `${firstName} ${lastName}`.trim();
+    if (fullName) return fullName;
+
+    if (user.username && user.username.trim()) return user.username;
+
+    const emailPrefix = user.email?.split('@')[0]?.trim();
+    return emailPrefix || 'Unknown User';
+  };
 
   return (
     <div className="min-h-screen bg-gradient-to-br from-blue-50 to-white py-8">
@@ -228,7 +278,7 @@ export const AdminPanel = () => {
                           className="flex items-center justify-between p-4 border border-gray-200 rounded-lg hover:shadow-md transition-all"
                         >
                           <div>
-                            <div className="font-medium text-gray-900">{u.name}</div>
+                            <div className="font-medium text-gray-900">{getUserDisplayName(u)}</div>
                             <div className="text-sm text-gray-500">{u.email}</div>
                           </div>
                           <div className="flex items-center space-x-2">
@@ -266,13 +316,13 @@ export const AdminPanel = () => {
                     <table className="min-w-full divide-y divide-gray-200">
                       <thead className="bg-gray-50">
                         <tr>
-                          <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
+                          <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider border-r border-gray-200">
                             Name
                           </th>
-                          <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
+                          <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider border-r border-gray-200">
                             Email
                           </th>
-                          <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
+                          <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider border-r border-gray-200">
                             Role
                           </th>
                           <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
@@ -281,30 +331,29 @@ export const AdminPanel = () => {
                         </tr>
                       </thead>
                       <tbody className="bg-white divide-y divide-gray-200">
-                        {users.map((u) => (
+                        {users.map((u) => {
+                          const statusBadge = getUserStatusBadge(u);
+                          return (
                           <tr key={u.id} className="hover:bg-gray-50">
-                            <td className="px-6 py-4 whitespace-nowrap text-sm font-medium text-gray-900">
-                              {u.name}
+                            <td className="px-6 py-4 whitespace-nowrap text-sm font-medium text-gray-900 border-r border-gray-200">
+                              {getUserDisplayName(u)}
                             </td>
-                            <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500">
+                            <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500 border-r border-gray-200">
                               {u.email}
                             </td>
-                            <td className="px-6 py-4 whitespace-nowrap">
+                            <td className="px-6 py-4 whitespace-nowrap border-r border-gray-200">
                               <span className="px-2 inline-flex text-xs leading-5 font-semibold rounded-full bg-blue-100 text-blue-800 capitalize">
                                 {u.role}
                               </span>
                             </td>
                             <td className="px-6 py-4 whitespace-nowrap">
-                              {u.role === 'public' && (
-                                <span className={`px-2 inline-flex text-xs leading-5 font-semibold rounded-full ${
-                                  u.admitted ? 'bg-green-100 text-green-800' : 'bg-yellow-100 text-yellow-800'
-                                }`}>
-                                  {u.admitted ? 'Admitted' : 'Pending'}
-                                </span>
-                              )}
+                              <span className={`px-2 inline-flex text-xs leading-5 font-semibold rounded-full ${statusBadge.className}`}>
+                                {statusBadge.label}
+                              </span>
                             </td>
                           </tr>
-                        ))}
+                          );
+                        })}
                       </tbody>
                     </table>
                   </div>
@@ -387,7 +436,7 @@ export const AdminPanel = () => {
                   <h2 className="text-xl font-bold text-gray-900 mb-4">All Projects Overview</h2>
                   <div className="grid md:grid-cols-3 gap-4">
                     <div className="p-4 bg-gray-50 rounded-lg border border-gray-200">
-                      <div className="text-2xl font-bold text-gray-900">{projects.filter(p => p.status === 'approved').length}</div>
+                      <div className="text-2xl font-bold text-gray-900">{publishedProjects.length}</div>
                       <div className="text-sm text-gray-600">Published</div>
                     </div>
                     <div className="p-4 bg-yellow-50 rounded-lg border border-yellow-200">
@@ -395,10 +444,108 @@ export const AdminPanel = () => {
                       <div className="text-sm text-gray-600">Pending Review</div>
                     </div>
                     <div className="p-4 bg-red-50 rounded-lg border border-red-200">
-                      <div className="text-2xl font-bold text-red-900">{projects.filter(p => p.status === 'archived').length}</div>
+                      <div className="text-2xl font-bold text-red-900">{archivedProjects.length}</div>
                       <div className="text-sm text-gray-600">Archived</div>
                     </div>
                   </div>
+                </div>
+
+                <div>
+                  <h2 className="text-xl font-bold text-gray-900 mb-4">Published Projects</h2>
+                  {publishedProjects.length === 0 ? (
+                    <div className="text-center py-8 border border-gray-200 rounded-lg">
+                      <FileText className="h-12 w-12 mx-auto text-gray-300 mb-2" />
+                      <p className="text-gray-500">No published projects</p>
+                    </div>
+                  ) : (
+                    <div className="space-y-3">
+                      {publishedProjects.map((project) => {
+                        const authors = Array.isArray(project.authors)
+                          ? project.authors.join(', ')
+                          : (project.authors || 'Unknown');
+                        return (
+                          <div key={project.id} className="border border-gray-200 rounded-lg p-4 hover:shadow-md transition-all">
+                            <div className="flex items-start justify-between mb-3">
+                              <div className="flex-1">
+                                <h3 className="font-semibold text-gray-900 mb-1">{project.title}</h3>
+                                <p className="text-sm text-gray-600">By: {authors}</p>
+                              </div>
+                              <span className="px-3 py-1 rounded-full text-xs font-medium border bg-green-100 text-green-800 border-green-200">
+                                Published
+                              </span>
+                            </div>
+                            <div className="flex items-center justify-end space-x-3 pt-3 border-t border-gray-100">
+                              {(project.file || project.fileUrl) && (
+                                <button
+                                  onClick={() => handleDownloadProject(project)}
+                                  className="flex items-center space-x-2 px-4 py-2 border border-blue-600 text-blue-600 rounded-lg hover:bg-blue-50 transition-colors text-sm font-medium"
+                                >
+                                  <Download className="h-4 w-4" />
+                                  <span>Download</span>
+                                </button>
+                              )}
+                              <button
+                                onClick={() => handleUnpublishProject(project.id)}
+                                className="flex items-center space-x-2 px-4 py-2 border border-orange-600 text-orange-600 rounded-lg hover:bg-orange-50 transition-colors text-sm font-medium"
+                              >
+                                <XCircle className="h-4 w-4" />
+                                <span>Unpublish</span>
+                              </button>
+                            </div>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  )}
+                </div>
+
+                <div>
+                  <h2 className="text-xl font-bold text-gray-900 mb-4">Archived Projects</h2>
+                  {archivedProjects.length === 0 ? (
+                    <div className="text-center py-8 border border-gray-200 rounded-lg">
+                      <FileText className="h-12 w-12 mx-auto text-gray-300 mb-2" />
+                      <p className="text-gray-500">No archived projects</p>
+                    </div>
+                  ) : (
+                    <div className="space-y-3">
+                      {archivedProjects.map((project) => {
+                        const authors = Array.isArray(project.authors)
+                          ? project.authors.join(', ')
+                          : (project.authors || 'Unknown');
+                        return (
+                          <div key={project.id} className="border border-gray-200 rounded-lg p-4 hover:shadow-md transition-all">
+                            <div className="flex items-start justify-between mb-3">
+                              <div className="flex-1">
+                                <h3 className="font-semibold text-gray-900 mb-1">{project.title}</h3>
+                                <p className="text-sm text-gray-600">By: {authors}</p>
+                              </div>
+                              <span className="px-3 py-1 rounded-full text-xs font-medium border bg-red-100 text-red-800 border-red-200">
+                                Archived
+                              </span>
+                            </div>
+                            <div className="flex items-center justify-end space-x-3 pt-3 border-t border-gray-100">
+                              {(project.file || project.fileUrl) && (
+                                <button
+                                  onClick={() => handleDownloadProject(project)}
+                                  className="flex items-center space-x-2 px-4 py-2 border border-blue-600 text-blue-600 rounded-lg hover:bg-blue-50 transition-colors text-sm font-medium"
+                                >
+                                  <Download className="h-4 w-4" />
+                                  <span>Download</span>
+                                </button>
+                              )}
+                              <button
+                                onClick={() => handleUnarchiveProject(project.id)}
+                                className="flex items-center space-x-2 px-4 py-2 border border-green-600 text-green-600 rounded-lg hover:bg-green-50 transition-colors text-sm font-medium"
+                              >
+                                <CheckCircle className="h-4 w-4" />
+                                <span>Unarchive</span>
+                              </button>
+                            </div>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  )}
                 </div>
               </div>
             )}

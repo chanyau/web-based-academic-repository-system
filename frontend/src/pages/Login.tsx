@@ -18,6 +18,7 @@ export const Login = () => {
 
     try {
       const user = await login(username, password);
+
       // Navigate based on role
       if (user.role === 'admin') {
         navigate('/analytics');
@@ -34,16 +35,20 @@ export const Login = () => {
   };
 
   return (
-    <div className="min-h-screen bg-gradient-to-br from-blue-50 to-white flex items-center justify-center px-4">
-      <div className="max-w-md w-full">
+    <div
+      className="min-h-screen bg-cover bg-center bg-no-repeat flex items-center justify-center px-4"
+      style={{ backgroundImage: "url('/login-bg.png')" }}
+    >
+      <div className="absolute inset-0 bg-blue-900/60"></div>
+      <div className="max-w-md w-full relative z-10">
         <div className="text-center mb-8">
           <div className="flex justify-center mb-4">
-            <div className="bg-blue-600 p-3 rounded-xl">
-              <BookOpen className="h-12 w-12 text-white" />
+            <div className="bg-white p-3 rounded-xl">
+              <BookOpen className="h-12 w-12 text-blue-900" />
             </div>
           </div>
-          <h2 className="text-3xl font-bold text-blue-900">Welcome Back</h2>
-          <p className="text-gray-600 mt-2">Sign in to access your account</p>
+          <h2 className="text-3xl font-bold text-white">Welcome</h2>
+         
         </div>
 
         <div className="bg-white rounded-xl shadow-xl p-8">
@@ -96,7 +101,7 @@ export const Login = () => {
                 <input type="checkbox" className="rounded border-gray-300 text-blue-600 focus:ring-blue-500" />
                 <span className="ml-2 text-sm text-gray-600">Remember me</span>
               </label>
-              <Link to="/forgot-password" className="text-sm text-blue-600 hover:text-blue-700">
+              <Link to="/forgot-password" className="text-sm text-blue-900 hover:text-blue-700">
                 Forgot password?
               </Link>
             </div>
@@ -104,7 +109,7 @@ export const Login = () => {
             <button
               type="submit"
               disabled={loading}
-              className="w-full bg-blue-600 text-white py-3 rounded-lg hover:bg-blue-700 transition-colors font-medium disabled:opacity-50 disabled:cursor-not-allowed"
+              className="w-full bg-blue-900 text-white py-3 rounded-lg hover:bg-blue-800 transition-colors font-medium disabled:opacity-50 disabled:cursor-not-allowed"
             >
               {loading ? 'Signing in...' : 'Sign In'}
             </button>
@@ -113,7 +118,7 @@ export const Login = () => {
           <div className="mt-6 text-center">
             <p className="text-sm text-gray-600">
               Don't have an account?{' '}
-              <Link to="/register" className="text-blue-600 hover:text-blue-700 font-medium">
+              <Link to="/register" className="text-blue-900 hover:text-blue-700 font-medium">
                 Register here
               </Link>
             </p>

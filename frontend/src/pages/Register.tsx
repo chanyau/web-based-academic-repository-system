@@ -2,6 +2,7 @@ import { useState } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
 import { BookOpen, Mail, Lock, User, Building, AlertCircle } from 'lucide-react';
 import { useAuth } from '../context/AuthContext';
+import { FACULTIES } from '../constants/faculties';
 
 export const Register = () => {
   const [formData, setFormData] = useState({
@@ -261,15 +262,19 @@ export const Register = () => {
                 </label>
                 <div className="relative">
                   <Building className="absolute left-3 top-1/2 transform -translate-y-1/2 h-5 w-5 text-gray-400" />
-                  <input
+                  <select
                     id="faculty"
                     name="faculty"
-                    type="text"
                     value={formData.faculty}
                     onChange={handleChange}
-                    className="w-full pl-10 pr-4 py-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent transition-all"
+                    className="w-full pl-10 pr-4 py-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent transition-all appearance-none bg-white"
                     required
-                  />
+                  >
+                    <option value="">Select Faculty</option>
+                    {FACULTIES.map((faculty) => (
+                      <option key={faculty} value={faculty}>{faculty}</option>
+                    ))}
+                  </select>
                 </div>
               </div>
 

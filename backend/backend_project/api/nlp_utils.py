@@ -7,8 +7,12 @@ Falls back to simple frequency-based extraction if libraries are not available.
 import os
 import logging
 import re
+import json
 from typing import List, Tuple, Optional
 from collections import Counter
+import math
+from urllib import request as urllib_request
+from urllib import error as urllib_error
 
 # Set up logging
 logger = logging.getLogger(__name__)
@@ -156,18 +160,46 @@ def extract_keywords_simple(text: str, top_n: int = 10) -> List[str]:
 
 def extract_text_from_pdf(file_path: str) -> str:
     """Extract text content from a PDF file"""
+    text = ""
+    
+    # Try PyPDF2 first
     try:
         from PyPDF2 import PdfReader
         reader = PdfReader(file_path)
-        text = ""
-        for page in reader.pages:
-            page_text = page.extract_text()
-            if page_text:
-                text += page_text + "\n"
-        return text.strip()
+        logger.info(f"PDF has {len(reader.pages)} pages")
+        for i, page in enumerate(reader.pages):
+            try:
+                page_text = page.extract_text()
+                if page_text:
+                    text += page_text + "\n"
+                    logger.info(f"Page {i+1}: extracted {len(page_text)} chars")
+            except Exception as page_err:
+                logger.warning(f"Error extracting page {i+1}: {page_err}")
+        
+        if text.strip():
+            logger.info(f"PyPDF2 extracted total {len(text)} chars")
+            return text.strip()
     except Exception as e:
-        logger.error(f"Error extracting text from PDF: {e}")
-        return ""
+        logger.error(f"PyPDF2 error: {e}")
+    
+    # Try pdfplumber as fallback (better for some PDFs)
+    try:
+        import pdfplumber
+        with pdfplumber.open(file_path) as pdf:
+            for i, page in enumerate(pdf.pages):
+                page_text = page.extract_text()
+                if page_text:
+                    text += page_text + "\n"
+            if text.strip():
+                logger.info(f"pdfplumber extracted {len(text)} chars")
+                return text.strip()
+    except ImportError:
+        logger.info("pdfplumber not installed, skipping fallback")
+    except Exception as e:
+        logger.error(f"pdfplumber error: {e}")
+    
+    logger.warning("Could not extract text from PDF - may be scanned/image-based")
+    return ""
 
 
 def extract_text_from_docx(file_path: str) -> str:
@@ -175,10 +207,60 @@ def extract_text_from_docx(file_path: str) -> str:
     try:
         from docx import Document
         doc = Document(file_path)
-        text = ""
+        text_parts = []
+
+        # Main body paragraphs
         for paragraph in doc.paragraphs:
-            text += paragraph.text + "\n"
-        return text.strip()
+            if paragraph.text and paragraph.text.strip():
+                text_parts.append(paragraph.text.strip())
+
+        # Table cells
+        for table in doc.tables:
+            for row in table.rows:
+                for cell in row.cells:
+                    cell_text = cell.text.strip()
+                    if cell_text:
+                        text_parts.append(cell_text)
+
+        # Header/footer text
+        for section in doc.sections:
+            for paragraph in section.header.paragraphs:
+                if paragraph.text and paragraph.text.strip():
+                    text_parts.append(paragraph.text.strip())
+            for paragraph in section.footer.paragraphs:
+                if paragraph.text and paragraph.text.strip():
+                    text_parts.append(paragraph.text.strip())
+
+        text = "\n".join(text_parts).strip()
+        if text:
+            return text
+
+        # Fallback: read raw OOXML document.xml
+        try:
+            import zipfile
+            from xml.etree import ElementTree as ET
+
+            with zipfile.ZipFile(file_path, 'r') as archive:
+                if 'word/document.xml' in archive.namelist():
+                    xml_content = archive.read('word/document.xml')
+                    root = ET.fromstring(xml_content)
+                    namespaces = {'w': 'http://schemas.openxmlformats.org/wordprocessingml/2006/main'}
+                    xml_text_nodes = root.findall('.//w:t', namespaces)
+                    raw_text = ' '.join(node.text for node in xml_text_nodes if node.text)
+                    return raw_text.strip()
+        except Exception as xml_err:
+            logger.warning(f"DOCX XML fallback failed: {xml_err}")
+
+        # Fallback 2: docx2txt (can handle some edge DOCX structures)
+        try:
+            import docx2txt
+            text_from_docx2txt = (docx2txt.process(file_path) or '').strip()
+            if text_from_docx2txt:
+                return text_from_docx2txt
+        except Exception as docx2txt_err:
+            logger.warning(f"docx2txt fallback failed: {docx2txt_err}")
+
+        return ""
     except Exception as e:
         logger.error(f"Error extracting text from DOCX: {e}")
         return ""
@@ -325,3 +407,192 @@ def suggest_keywords(abstract: str, existing_keywords: List[str] = None, top_n: 
                 break
     
     return suggestions
+
+
+def cosine_similarity_from_text(text_a: str, text_b: str) -> float:
+    """
+    Compute cosine similarity between two text documents using term-frequency vectors.
+    Returns score in [0, 1].
+    """
+    if not text_a or not text_b:
+        return 0.0
+
+    tokens_a = [t for t in tokenize(text_a) if t not in STOP_WORDS]
+    tokens_b = [t for t in tokenize(text_b) if t not in STOP_WORDS]
+
+    if not tokens_a or not tokens_b:
+        return 0.0
+
+    freq_a = Counter(tokens_a)
+    freq_b = Counter(tokens_b)
+
+    common_terms = set(freq_a.keys()) & set(freq_b.keys())
+    dot_product = sum(freq_a[term] * freq_b[term] for term in common_terms)
+
+    magnitude_a = math.sqrt(sum(value * value for value in freq_a.values()))
+    magnitude_b = math.sqrt(sum(value * value for value in freq_b.values()))
+
+    if magnitude_a == 0 or magnitude_b == 0:
+        return 0.0
+
+    return dot_product / (magnitude_a * magnitude_b)
+
+
+def compute_similarity_report(input_text: str, projects, top_k: int = 5) -> dict:
+    """
+    Compare an input text against a queryset/list of projects and return similarity report.
+    """
+    if not input_text or len(input_text.strip()) < 20:
+        return {
+            'similarity_score': 0,
+            'top_matches': []
+        }
+
+    matches = []
+    max_score = 0.0
+
+    for project in projects:
+        project_text = " ".join([
+            project.title or "",
+            project.abstract or "",
+            project.keywords or ""
+        ]).strip()
+
+        if not project_text:
+            continue
+
+        similarity = cosine_similarity_from_text(input_text, project_text)
+        max_score = max(max_score, similarity)
+
+        if similarity > 0:
+            matches.append({
+                'project_id': project.id,
+                'title': project.title,
+                'similarity': round(similarity * 100, 2)
+            })
+
+    matches.sort(key=lambda item: item['similarity'], reverse=True)
+
+    return {
+        'similarity_score': int(round(max_score * 100)),
+        'top_matches': matches[:top_k]
+    }
+
+
+def _extract_first_numeric_score(payload):
+    """Recursively find a numeric score in nested JSON payload and normalize to percentage."""
+    if isinstance(payload, dict):
+        # Prefer common keys first
+        preferred_keys = [
+            'score', 'similarity_score', 'similarity', 'plagiarism_score',
+            'overall_score', 'overall_similarity'
+        ]
+        for key in preferred_keys:
+            if key in payload:
+                value = payload[key]
+                if isinstance(value, (int, float)):
+                    return float(value)
+        for value in payload.values():
+            found = _extract_first_numeric_score(value)
+            if found is not None:
+                return found
+    elif isinstance(payload, list):
+        for item in payload:
+            found = _extract_first_numeric_score(item)
+            if found is not None:
+                return found
+    elif isinstance(payload, (int, float)):
+        return float(payload)
+    return None
+
+
+def call_winston_similarity(input_text: str) -> dict:
+    """
+    Call Winston AI plagiarism API and return a normalized similarity score (0-100).
+    Returns {'score': int|None, 'raw': dict|None, 'error': str|None}
+    """
+    api_key = os.getenv('WINSTON_AI_API_KEY', '').strip()
+    api_url = os.getenv('WINSTON_AI_API_URL', 'https://api.gowinston.ai/v2/plagiarism').strip()
+
+    if not api_key:
+        return {'score': None, 'raw': None, 'error': 'WINSTON_AI_API_KEY not configured'}
+
+    if not input_text or len(input_text.strip()) < 20:
+        return {'score': None, 'raw': None, 'error': 'Insufficient text for Winston check'}
+
+    payload = {
+        'text': input_text,
+        'content': input_text,
+    }
+
+    req = urllib_request.Request(
+        url=api_url,
+        data=json.dumps(payload).encode('utf-8'),
+        headers={
+            'Authorization': f'Bearer {api_key}',
+            'X-API-Key': api_key,
+            'Content-Type': 'application/json',
+            'Accept': 'application/json',
+            'User-Agent': 'AcademicHub-Backend/1.0'
+        },
+        method='POST'
+    )
+
+    try:
+        with urllib_request.urlopen(req, timeout=25) as resp:
+            body = resp.read().decode('utf-8')
+            parsed = json.loads(body) if body else {}
+
+            score = _extract_first_numeric_score(parsed)
+            if score is None:
+                return {'score': None, 'raw': parsed, 'error': 'Could not parse Winston score'}
+
+            # Normalize 0-1 scores to 0-100
+            normalized_score = score * 100 if score <= 1 else score
+            normalized_score = max(0, min(100, normalized_score))
+
+            return {
+                'score': int(round(normalized_score)),
+                'raw': parsed,
+                'error': None
+            }
+    except urllib_error.HTTPError as http_err:
+        try:
+            body = http_err.read().decode('utf-8')
+        except Exception:
+            body = str(http_err)
+        return {'score': None, 'raw': None, 'error': f'Winston HTTP error: {body}'}
+    except Exception as err:
+        return {'score': None, 'raw': None, 'error': f'Winston request failed: {err}'}
+
+
+def compute_hybrid_similarity(local_score: int, winston_score: Optional[int], local_top_matches: list) -> dict:
+    """
+    Combine local and Winston scores into a hybrid result.
+    Uses 60% Winston + 40% Local when Winston is available.
+    """
+    if winston_score is None:
+        return {
+            'similarity_score': int(local_score),
+            'method': 'local_cosine_only',
+            'components': {
+                'local_score': int(local_score),
+                'winston_score': None,
+                'weights': {'local': 1.0, 'winston': 0.0}
+            },
+            'top_matches': local_top_matches
+        }
+
+    hybrid = int(round((0.4 * float(local_score)) + (0.6 * float(winston_score))))
+    hybrid = max(0, min(100, hybrid))
+
+    return {
+        'similarity_score': hybrid,
+        'method': 'hybrid_local_winston',
+        'components': {
+            'local_score': int(local_score),
+            'winston_score': int(winston_score),
+            'weights': {'local': 0.4, 'winston': 0.6}
+        },
+        'top_matches': local_top_matches
+    }
