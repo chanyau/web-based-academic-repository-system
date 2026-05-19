@@ -1,0 +1,37 @@
+# Environment files
+.env
+.env.*
+!.env.example
+
+# Django / Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.venv/
+backend/backend_project/.venv/
+*.sqlite3
+*.db
+*.sqlite
+*.log
+
+# Credentials / keys
+credentials.json
+*.pem
+*.key
+*.crt
+
+# Node / Vite
+node_modules/
+*.local
+
+# Build outputs
+/dist/
+/build/
+
+# Media/uploads
+media/
+
+# OS files
+.DS_Store
+Thumbs.db
