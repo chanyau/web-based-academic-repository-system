@@ -42,6 +42,8 @@ export const AuthProvider = ({ children }: { children: ReactNode }) => {
         faculty: backendUser?.faculty,
         department: backendUser?.department,
         admitted: backendUser?.admitted,
+        supervisorId: backendUser?.supervisorId ?? null,
+        supervisorName: backendUser?.supervisorName ?? null,
         avatar: `https://ui-avatars.com/api/?name=${encodeURIComponent(backendUser?.username || 'User')}&background=2563eb&color=fff`
       };
       
@@ -108,6 +110,8 @@ export const AuthProvider = ({ children }: { children: ReactNode }) => {
         faculty: backendUser?.faculty || faculty,
         department: backendUser?.department || department,
         admitted: backendUser?.admitted !== undefined ? backendUser.admitted : false,
+        supervisorId: backendUser?.supervisorId ?? null,
+        supervisorName: backendUser?.supervisorName ?? null,
         avatar: `https://ui-avatars.com/api/?name=${encodeURIComponent(backendUser?.username || username)}&background=2563eb&color=fff`
       };
 

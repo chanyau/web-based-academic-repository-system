@@ -1,6 +1,6 @@
 import { useAuth } from '../context/AuthContext';
 import { Upload, FileText, Clock, CheckCircle, AlertTriangle, TrendingUp, Eye, MessageSquare } from 'lucide-react';
-import { Link, useNavigate } from 'react-router-dom';
+import { Link, useNavigate, useSearchParams } from 'react-router-dom';
 import { projectService } from '../services/projectService';
 import { useState, useEffect } from 'react';
 import { Project } from '../types';
@@ -8,25 +8,36 @@ import { Project } from '../types';
 export const Dashboard = () => {
 	const { user } = useAuth();
 	const navigate = useNavigate();
+	const [searchParams] = useSearchParams();
 	const [projects, setProjects] = useState<Project[]>([]);
 	const [loading, setLoading] = useState(true);
 	const [error, setError] = useState<string | null>(null);
+	const [statusFilter, setStatusFilter] = useState<string>('all');
 
 	useEffect(() => {
 		const fetchProjects = async () => {
 			try {
 				setLoading(true);
 				setError(null);
+				const sortBySubmittedAt = (items: Project[]) =>
+					items
+						.slice()
+						.sort((a, b) => {
+							const aTime = a.submittedAt ? new Date(a.submittedAt).getTime() : 0;
+							const bTime = b.submittedAt ? new Date(b.submittedAt).getTime() : 0;
+							if (bTime !== aTime) return bTime - aTime;
+							return (Number(b.id) || 0) - (Number(a.id) || 0);
+						});
 				
 				if (user?.role === 'student' && user?.id) {
 					const projects = await projectService.getProjects({ owner: user.id });
-					setProjects(projects);
+					setProjects(sortBySubmittedAt(projects));
 				} else if (user?.role === 'lecturer' && user?.id) {
 					const projects = await projectService.getProjects({ supervisor: user.id });
-					setProjects(projects);
+					setProjects(sortBySubmittedAt(projects));
 				} else {
 					const projects = await projectService.getProjects();
-					setProjects(projects);
+					setProjects(sortBySubmittedAt(projects));
 				}
 			} catch (err) {
 				setError('Failed to load projects. Please try again later.');
@@ -41,8 +52,26 @@ export const Dashboard = () => {
 		}
 	}, [user]);
 
+	useEffect(() => {
+		const statusParam = searchParams.get('status');
+		if (statusParam) {
+			setStatusFilter(statusParam);
+		} else {
+			setStatusFilter('all');
+		}
+	}, [searchParams]);
+
 	const handleResubmit = (projectId: string) => {
 		navigate(`/submit/${projectId}`);
+	};
+
+	const handleViewDetails = (project: Project) => {
+		if (user?.role === 'lecturer' && project.status !== 'approved') {
+			navigate('/review');
+			return;
+		}
+
+		navigate(`/projects/${project.id}`);
 	};
 
 	const canContinueWorkflow = (status: string) => {
@@ -82,6 +111,9 @@ export const Dashboard = () => {
 	const underReviewProjects = projects.filter(p => p.status === 'under_review').length;
 	const pendingProjects = projects.filter(p => p.status === 'pending').length;
 	const revisionProjects = projects.filter(p => p.status === 'revision_requested').length;
+	const filteredProjects = statusFilter === 'all'
+		? projects
+		: projects.filter(p => p.status === statusFilter);
 
 	return (
 		<div className="min-h-screen bg-slate-100">
@@ -93,37 +125,53 @@ export const Dashboard = () => {
 				)}
 
 				<div className="grid md:grid-cols-2 lg:grid-cols-4 gap-6 mb-8">
-					<div className="bg-blue-900 rounded-xl shadow-lg p-6">
+					<button
+						type="button"
+						onClick={() => navigate('/dashboard?status=all')}
+						className="bg-blue-900 rounded-xl shadow-lg p-6 text-left hover:shadow-xl transition-all"
+					>
 						<div className="flex items-center justify-between mb-2">
 							<FileText className="h-8 w-8 text-white" />
 							<span className="text-3xl font-bold text-white">{totalProjects}</span>
 						</div>
 						<p className="text-blue-100 text-sm">Total Projects</p>
-					</div>
+					</button>
 
-					<div className="bg-blue-800 rounded-xl shadow-lg p-6">
+					<button
+						type="button"
+						onClick={() => navigate('/dashboard?status=approved')}
+						className="bg-blue-800 rounded-xl shadow-lg p-6 text-left hover:shadow-xl transition-all"
+					>
 						<div className="flex items-center justify-between mb-2">
 							<CheckCircle className="h-8 w-8 text-green-400" />
 							<span className="text-3xl font-bold text-white">{approvedProjects}</span>
 						</div>
 						<p className="text-blue-100 text-sm">Approved</p>
-					</div>
+					</button>
 
-					<div className="bg-blue-700 rounded-xl shadow-lg p-6">
+					<button
+						type="button"
+						onClick={() => navigate('/dashboard?status=under_review')}
+						className="bg-blue-700 rounded-xl shadow-lg p-6 text-left hover:shadow-xl transition-all"
+					>
 						<div className="flex items-center justify-between mb-2">
 							<Clock className="h-8 w-8 text-blue-200" />
 							<span className="text-3xl font-bold text-white">{underReviewProjects}</span>
 						</div>
 						<p className="text-blue-100 text-sm">Under Review</p>
-					</div>
+					</button>
 
-					<div className="bg-blue-500 rounded-xl shadow-lg p-6">
+					<button
+						type="button"
+						onClick={() => navigate('/dashboard?status=revision_requested')}
+						className="bg-blue-500 rounded-xl shadow-lg p-6 text-left hover:shadow-xl transition-all"
+					>
 						<div className="flex items-center justify-between mb-2">
 							<AlertTriangle className="h-8 w-8 text-yellow-400" />
 							<span className="text-3xl font-bold text-white">{revisionProjects}</span>
 						</div>
 						<p className="text-blue-100 text-sm">Revision Requested</p>
-					</div>
+					</button>
 				</div>
 
 				{user?.role === 'student' ? (
@@ -133,12 +181,22 @@ export const Dashboard = () => {
 								<h2 className="text-xl font-bold text-blue-900">My Projects</h2>
 							</div>
 
+							<div className="mb-6 rounded-lg border border-blue-100 bg-blue-50 px-4 py-3">
+								<p className="text-xs uppercase tracking-wide text-blue-700">Assigned Supervisor</p>
+								<p className="text-base font-semibold text-blue-900">
+									{user?.supervisorName || 'Not assigned yet'}
+								</p>
+								{!user?.supervisorName && (
+									<p className="text-xs text-blue-700 mt-1">Sign in again if your assignment has not appeared.</p>
+								)}
+							</div>
+
 							{loading ? (
 								<div className="text-center py-12">
 									<div className="inline-block animate-spin rounded-full h-8 w-8 border-b-2 border-blue-900"></div>
 									<p className="mt-2 text-gray-600">Loading projects...</p>
 								</div>
-							) : projects.length === 0 ? (
+							) : filteredProjects.length === 0 ? (
 								<div className="text-center py-12">
 									<FileText className="h-16 w-16 mx-auto text-gray-300 mb-4" />
 									<p className="text-gray-600">No projects found</p>
@@ -152,7 +210,7 @@ export const Dashboard = () => {
 								</div>
 							) : (
 								<div className="space-y-4">
-									{projects.map((project) => (
+									{filteredProjects.map((project) => (
 										<div
 											key={project.id}
 											className="border border-gray-200 rounded-lg p-4 hover:shadow-md transition-all"
@@ -199,12 +257,12 @@ export const Dashboard = () => {
 																{project.status === 'revision_requested' ? 'Resubmit' : 'Continue Submission'}
 														</button>
 													)}
-													<Link
-														to={`/projects/${project.id}`}
-														className="text-sm text-blue-900 hover:text-blue-700 font-medium"
-													>
-														View Details →
-													</Link>
+														<button
+															onClick={() => handleViewDetails(project)}
+															className="text-sm text-blue-900 hover:text-blue-700 font-medium"
+														>
+															View Details →
+														</button>
 												</div>
 											</div>
 										</div>
@@ -225,14 +283,14 @@ export const Dashboard = () => {
 										<div className="inline-block animate-spin rounded-full h-8 w-8 border-b-2 border-blue-900"></div>
 										<p className="mt-2 text-gray-600">Loading projects...</p>
 									</div>
-								) : projects.length === 0 ? (
+								) : filteredProjects.length === 0 ? (
 									<div className="text-center py-12">
 										<FileText className="h-16 w-16 mx-auto text-gray-300 mb-4" />
 										<p className="text-gray-600">No projects found</p>
 									</div>
 								) : (
 									<div className="space-y-4">
-										{projects.map((project) => (
+										{filteredProjects.map((project) => (
 											<div
 												key={project.id}
 												className="border border-gray-200 rounded-lg p-4 hover:shadow-md transition-all"

@@ -40,6 +40,10 @@ export const ProjectDetail = () => {
       setLoading(true);
       setError('');
       const data = await projectService.getProject(projectId);
+      if (user?.role === 'lecturer' && data.status !== 'approved') {
+        navigate('/review');
+        return;
+      }
       setProject(data);
     } catch (err: any) {
       console.error('Error loading project:', err);
@@ -61,6 +65,14 @@ export const ProjectDetail = () => {
     } finally {
       setDownloading(false);
     }
+  };
+
+  const getReportDownloadUrl = (reportLocation?: string | null) => {
+    if (!reportLocation) return null;
+    if (reportLocation.startsWith('http')) return reportLocation;
+    const baseUrl = (import.meta.env.VITE_API_URL || '/api').replace('/api', '');
+    const normalizedPath = reportLocation.startsWith('/') ? reportLocation : `/${reportLocation}`;
+    return `${baseUrl}${normalizedPath}`;
   };
 
   if (loading) {
@@ -184,6 +196,21 @@ export const ProjectDetail = () => {
                   <Share2 className="h-5 w-5" />
                 </button>
               </div>
+
+              {(user?.role === 'lecturer' || user?.role === 'admin') && (project.plagiarismReportFileUrl || project.plagiarismReportUrl) && (
+                <div className="mb-6">
+                  <button
+                    onClick={() => {
+                      const url = getReportDownloadUrl(project.plagiarismReportFileUrl || project.plagiarismReportUrl);
+                      if (url) window.open(url, '_blank');
+                    }}
+                    className="inline-flex items-center space-x-2 px-6 py-3 border-2 border-purple-600 text-purple-700 rounded-lg hover:bg-purple-50 transition-colors font-medium"
+                  >
+                    <Download className="h-5 w-5" />
+                    <span>Download Plagiarism Report</span>
+                  </button>
+                </div>
+              )}
 
               {isStudentOwner && canContinueSubmission && (
                 <div className="mb-6">

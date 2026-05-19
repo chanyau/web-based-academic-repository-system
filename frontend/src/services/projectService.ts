@@ -1,5 +1,5 @@
 import { apiClient } from './api';
-import { Project, ProjectStageProgress, ProjectStageCode, WorkflowDetails, DevelopmentSubmission } from '../types';
+import { Project, ProjectStageCode, ProjectStageProgress, WorkflowDetails } from '../types';
 
 export interface ProjectSearchParams {
   query?: string;
@@ -25,6 +25,8 @@ export interface SimilarityCheckResult {
     title: string;
     similarity: number;
   }>;
+  report_url?: string | null;
+  report_file_url?: string | null;
   method?: 'local_cosine_only' | 'hybrid_local_winston';
   components?: {
     local_score: number;
@@ -34,21 +36,14 @@ export interface SimilarityCheckResult {
       winston: number;
     };
   };
+  local_details?: {
+    average_top_matches: number;
+    peak_match: number;
+    evaluated_projects: number;
+  };
   winston_status?: 'used' | 'fallback_local_only';
   winston_error?: string | null;
   message?: string;
-}
-
-export interface StageReviewPayload {
-  stage: ProjectStageCode;
-  feedback: string;
-  review_status: 'approved' | 'revision_requested';
-}
-
-export interface FinalSubmitPayload {
-  finalReport: File;
-  sourceCode?: File;
-  supportingDocuments?: File;
 }
 
 export const projectService = {
@@ -234,9 +229,11 @@ export const projectService = {
   /**
    * Extract keywords from uploaded document using AI/NLP
    */
-  async extractKeywords(file: File, existingKeywords?: string[], abstractText?: string, titleText?: string): Promise<{ keywords: string[]; suggestions?: string[]; message?: string; source?: string }> {
+  async extractKeywords(file: File | null, existingKeywords?: string[], abstractText?: string, titleText?: string): Promise<{ keywords: string[]; suggestions?: string[]; message?: string; source?: string }> {
     const formData = new FormData();
-    formData.append('file', file);
+    if (file) {
+      formData.append('file', file);
+    }
     if (existingKeywords && existingKeywords.length > 0) {
       existingKeywords.forEach(k => formData.append('existing_keywords', k));
     }
@@ -266,52 +263,199 @@ export const projectService = {
     return apiClient.postFormData<SimilarityCheckResult>('/check-similarity/', formData);
   },
 
+  async extractMetadata(file: File): Promise<{ title?: string; abstract?: string; authors?: string[]; message?: string }> {
+    const formData = new FormData();
+    formData.append('file', file);
+    return apiClient.postFormData('/extract-metadata/', formData);
+  },
+
   async getProjectStageProgress(projectId: string): Promise<ProjectStageProgress[]> {
-    return apiClient.get<ProjectStageProgress[]>(`/projects/${projectId}/stage_progress/`);
+    return apiClient.get<ProjectStageProgress[]>(`/projects/${projectId}/stage-progress/`);
   },
 
   async submitProjectStage(projectId: string, stage: ProjectStageCode, file: File, studentNote?: string): Promise<ProjectStageProgress> {
     const formData = new FormData();
-    formData.append('stage', stage);
     formData.append('file', file);
     if (studentNote) {
       formData.append('student_note', studentNote);
     }
-    return apiClient.postFormData<ProjectStageProgress>(`/projects/${projectId}/submit_stage/`, formData);
+    return apiClient.postFormData<ProjectStageProgress>(`/projects/${projectId}/stage-submissions/${stage}/`, formData);
   },
 
-  async reviewProjectStage(projectId: string, payload: StageReviewPayload): Promise<ProjectStageProgress> {
-    return apiClient.post<ProjectStageProgress>(`/projects/${projectId}/review_stage/`, payload);
+  // Messaging functions
+  async sendStageUploadNotification(projectId: string, stage: ProjectStageCode, supervisorId: string, studentName?: string, projectTitle?: string): Promise<void> {
+    try {
+      // Import messageService dynamically to avoid circular imports
+      const { messageService } = await import('./messageService');
+      await messageService.createStageUploadNotification(
+        projectId, 
+        stage, 
+        supervisorId, 
+        studentName || 'Student', 
+        projectTitle || 'Project'
+      );
+    } catch (err: any) {
+      console.warn("Failed to send stage upload notification:", err?.message);
+      throw err;
+    }
   },
 
-  async getWorkflowDetails(projectId: string): Promise<WorkflowDetails> {
-    return apiClient.get<WorkflowDetails>(`/projects/${projectId}/workflow_details/`);
+  async sendStageReviewNotification(projectId: string, stage: ProjectStageCode, studentId: string, reviewStatus: string, supervisorName?: string, projectTitle?: string, feedback?: string): Promise<void> {
+    try {
+      // Import messageService dynamically to avoid circular imports
+      const { messageService } = await import('./messageService');
+      await messageService.createStageReviewNotification(
+        projectId, 
+        stage, 
+        studentId, 
+        reviewStatus,
+        supervisorName || 'Supervisor',
+        projectTitle || 'Project',
+        feedback
+      );
+    } catch (err: any) {
+      console.warn("Failed to send stage review notification:", err?.message);
+      throw err;
+    }
   },
 
-  async uploadDevelopmentSubmission(projectId: string, submissionType: 'progress_report' | 'chapter' | 'code', file: File, comment?: string): Promise<DevelopmentSubmission> {
+  async notifySimilarityReport({
+    projectId,
+    studentName,
+    projectTitle,
+    similarityResult,
+  }: {
+    projectId: string;
+    studentName?: string;
+    projectTitle?: string;
+    similarityResult: SimilarityCheckResult;
+  }): Promise<void> {
+    const readableStudent = studentName || 'The student';
+    const readableTitle = projectTitle || 'the project';
+    const methodLabel = similarityResult.method === 'hybrid_local_winston'
+      ? 'Hybrid (Local + Winston AI)'
+      : 'Local cosine analysis';
+
+    const componentSummary = similarityResult.components
+      ? `Components — Local: ${similarityResult.components.local_score}% | Winston: ${
+          similarityResult.components.winston_score !== null
+            ? `${similarityResult.components.winston_score}%`
+            : 'N/A'
+        }`
+      : null;
+
+    const localDetails = similarityResult.local_details
+      ? `Local insights — Avg top matches: ${similarityResult.local_details.average_top_matches}% | Peak match: ${similarityResult.local_details.peak_match}% across ${similarityResult.local_details.evaluated_projects} projects.`
+      : null;
+
+    const topMatchesMessage = (similarityResult.top_matches || [])
+      .slice(0, 3)
+      .map((match, index) => `${index + 1}. ${match.title} (${match.similarity}%)`)
+      .join('\n');
+
+    const bodyParts = [
+      `📊 ${readableStudent} completed the similarity check for "${readableTitle}".`,
+      `Overall score: ${similarityResult.similarity_score}% (${methodLabel}).`,
+      componentSummary,
+      localDetails,
+      topMatchesMessage ? `Top overlaps:\n${topMatchesMessage}` : null,
+    ].filter(Boolean);
+
+    const { messageService } = await import('./messageService');
+    await messageService.sendMessage(projectId, bodyParts.join('\n\n'));
+  },
+
+  async updateStageReview(projectId: string, stage: ProjectStageCode, reviewData: {
+    review_status: 'approved' | 'revision_requested' | 'rejected';
+    supervisor_feedback?: string;
+  }): Promise<ProjectStageProgress> {
+    return apiClient.put<ProjectStageProgress>(`/projects/${projectId}/stage-review/${stage}/`, reviewData);
+  },
+
+  async submitFinalDocument(projectId: string, file: File, note?: string): Promise<ProjectStageProgress> {
+    const formData = new FormData();
+    formData.append('file', file);
+    if (note) {
+      formData.append('note', note);
+    }
+    return apiClient.postFormData<ProjectStageProgress>(`/projects/${projectId}/final-document/`, formData);
+  },
+
+  async submitPlagiarismCheck({
+    projectId,
+    file,
+    similarityScore,
+    note,
+  }: {
+    projectId: string;
+    file?: File;
+    similarityScore?: number;
+    note?: string;
+  }): Promise<ProjectStageProgress> {
+    const formData = new FormData();
+    if (file) {
+      formData.append('file', file);
+    }
+    if (typeof similarityScore === 'number') {
+      formData.append('similarity_score', String(similarityScore));
+    }
+    if (note) {
+      formData.append('note', note);
+    }
+    return apiClient.postFormData<ProjectStageProgress>(`/projects/${projectId}/plagiarism-check/`, formData);
+  },
+
+  async reviewProjectStage(
+    projectId: string,
+    payload: { stage: ProjectStageCode; feedback?: string; review_status: 'approved' | 'revision_requested' | 'pending' }
+  ): Promise<ProjectStageProgress> {
+    return apiClient.post(`/projects/${projectId}/stage-submissions/${payload.stage}/review/`, payload);
+  },
+
+  async submitDevelopment(
+    projectId: string,
+    submissionType: 'progress_report' | 'chapter' | 'code',
+    file: File,
+    comment?: string
+  ): Promise<any> {
     const formData = new FormData();
     formData.append('submission_type', submissionType);
     formData.append('file', file);
-    if (comment) formData.append('comment', comment);
-    return apiClient.postFormData<DevelopmentSubmission>(`/projects/${projectId}/upload_development/`, formData);
+    if (comment) {
+      formData.append('comment', comment);
+    }
+    return apiClient.postFormData(`/projects/${projectId}/development-submissions/`, formData);
   },
 
-  async submitFinal(projectId: string, payload: FinalSubmitPayload): Promise<any> {
+  async submitFinalSubmission({
+    projectId,
+    finalReport,
+    sourceCode,
+    supportingDocs,
+    note,
+  }: {
+    projectId: string;
+    finalReport: File;
+    sourceCode?: File;
+    supportingDocs?: File;
+    note?: string;
+  }): Promise<any> {
     const formData = new FormData();
-    formData.append('final_report', payload.finalReport);
-    if (payload.sourceCode) {
-      formData.append('source_code', payload.sourceCode);
+    formData.append('final_report', finalReport);
+    if (sourceCode) {
+      formData.append('source_code', sourceCode);
     }
-    if (payload.supportingDocuments) {
-      formData.append('supporting_documents', payload.supportingDocuments);
+    if (supportingDocs) {
+      formData.append('supporting_documents', supportingDocs);
     }
-    return apiClient.postFormData<any>(`/projects/${projectId}/submit_final/`, formData);
+    if (note) {
+      formData.append('note', note);
+    }
+    return apiClient.postFormData(`/projects/${projectId}/final-submission/`, formData);
   },
 
-  async uploadChaptersBundle(projectId: string, file: File): Promise<any> {
-    const formData = new FormData();
-    formData.append('file', file);
-    return apiClient.postFormData<any>(`/projects/${projectId}/upload_chapters_bundle/`, formData);
+  async getWorkflowDetails(projectId: string): Promise<WorkflowDetails> {
+    return apiClient.get<WorkflowDetails>(`/projects/${projectId}/workflow/`);
   },
 };
 

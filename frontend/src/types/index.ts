@@ -11,7 +11,55 @@ export interface User {
   department?: string;
   // For public users: whether admin has approved admission
   admitted?: boolean;
+  supervisorId?: number | string | null;
+  supervisorName?: string | null;
   avatar?: string;
+}
+
+export interface SuperviseeSummary {
+  id: number;
+  name: string;
+  email: string;
+  faculty?: string | null;
+  department?: string | null;
+  project_count: number;
+  latest_submission?: string | null;
+}
+
+export interface SuperviseesResponse {
+  submitted: SuperviseeSummary[];
+  not_submitted: SuperviseeSummary[];
+  total: number;
+}
+
+export interface SuperviseeStageSummary {
+  total: number;
+  submitted: number;
+  completed: number;
+  pending: number;
+}
+
+export interface SuperviseeProjectDetail extends Project {
+  stage_progress: ProjectStageProgress[];
+  stage_summary: SuperviseeStageSummary;
+}
+
+export interface SuperviseeDetail {
+  student: {
+    id: number;
+    name: string;
+    email: string;
+    faculty?: string | null;
+    department?: string | null;
+    supervisor?: {
+      id: number;
+      name: string;
+      email: string;
+      faculty?: string | null;
+      department?: string | null;
+    } | null;
+  };
+  projects: SuperviseeProjectDetail[];
 }
 
 export interface Project {
@@ -24,12 +72,13 @@ export interface Project {
   year: number;
   type: 'thesis' | 'capstone' | 'dissertation' | 'research';
   keywords: string[];
+  focusArea?: string;
   // Owner (student) who submitted the project
   ownerId?: string;
   supervisorId: string;
   supervisorName: string;
   submittedAt: string;
-  status: 'pending' | 'under_review' | 'revision_requested' | 'approved' | 'archived';
+  status: 'pending' | 'plagiarism_checking' | 'plagiarism_completed' | 'under_review' | 'revision_requested' | 'approved' | 'archived';
   objectives?: string;
   workflowStatus?:
     | 'proposal_submitted'
@@ -39,6 +88,8 @@ export interface Project {
     | 'in_progress'
     | 'interim_evaluated'
     | 'final_submitted'
+    | 'plagiarism_checking'
+    | 'plagiarism_completed'
     | 'plagiarism_flagged'
     | 'plagiarism_passed'
     | 'approved'
@@ -46,6 +97,7 @@ export interface Project {
     | 'rejected'
     | 'archived';
   plagiarismReportUrl?: string;
+  plagiarismReportFileUrl?: string;
   similarityScore?: number;
   fileUrl?: string;
   file?: string;  // Backend returns 'file' field
@@ -90,10 +142,11 @@ export interface WorkflowDetails {
 
 export type ProjectStageCode =
   | 'proposal'
-  | 'literature_review'
-  | 'methodology'
-  | 'implementation'
-  | 'final_document';
+  | 'chapter1'
+  | 'chapter2'
+  | 'chapter3'
+  | 'final_document'
+  | 'plagiarism_check';
 
 export type ProjectStageReviewStatus = 'not_submitted' | 'pending' | 'revision_requested' | 'approved';
 

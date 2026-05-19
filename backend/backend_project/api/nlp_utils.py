@@ -266,6 +266,39 @@ def extract_text_from_docx(file_path: str) -> str:
         return ""
 
 
+def infer_focus_area(title: str, abstract: str) -> str:
+    text = f"{title or ''} {abstract or ''}".lower()
+    if not text.strip():
+        return "General"
+
+    focus_map = [
+        ("AI", ["artificial intelligence", "machine learning", "deep learning", "neural", "nlp", "computer vision", "ai"]),
+        ("Networking", ["network", "routing", "wireless", "sdn", "tcp", "ip", "lan", "wan", "5g"]),
+        ("Security", ["security", "secure", "encryption", "cryptography", "malware", "attack", "vulnerability", "authentication", "authorization"]),
+        ("IoT", ["iot", "internet of things", "sensor", "embedded", "smart device"]),
+        ("Data Science", ["data science", "analytics", "big data", "data mining", "prediction", "forecast"]),
+        ("Software Engineering", ["software", "development", "agile", "testing", "devops", "architecture"]),
+        ("Database", ["database", "dbms", "sql", "nosql", "data warehouse"]),
+        ("HCI", ["human computer", "usability", "interaction", "ui", "ux"]),
+        ("Cloud", ["cloud", "aws", "azure", "gcp", "virtualization", "container", "kubernetes"]),
+        ("Mobile", ["mobile", "android", "ios", "smartphone"]),
+    ]
+
+    best_area = "General"
+    best_score = 0
+
+    for area, keywords in focus_map:
+        score = 0
+        for keyword in keywords:
+            if keyword in text:
+                score += 1
+        if score > best_score:
+            best_score = score
+            best_area = area
+
+    return best_area
+
+
 def extract_text_from_file(file_path: str) -> str:
     """Extract text from a file based on its extension"""
     if not file_path or not os.path.exists(file_path):
@@ -449,7 +482,7 @@ def compute_similarity_report(input_text: str, projects, top_k: int = 5) -> dict
         }
 
     matches = []
-    max_score = 0.0
+    percent_scores = []
 
     for project in projects:
         project_text = " ".join([
@@ -462,36 +495,52 @@ def compute_similarity_report(input_text: str, projects, top_k: int = 5) -> dict
             continue
 
         similarity = cosine_similarity_from_text(input_text, project_text)
-        max_score = max(max_score, similarity)
+        if similarity <= 0:
+            continue
 
-        if similarity > 0:
-            matches.append({
-                'project_id': project.id,
-                'title': project.title,
-                'similarity': round(similarity * 100, 2)
-            })
+        percent_similarity = round(similarity * 100, 2)
+        percent_scores.append(percent_similarity)
+        matches.append({
+            'project_id': project.id,
+            'title': project.title,
+            'similarity': percent_similarity
+        })
 
     matches.sort(key=lambda item: item['similarity'], reverse=True)
+    top_matches = matches[:top_k]
+
+    if percent_scores:
+        top_scores = percent_scores[:top_k]
+        avg_top = sum(top_scores) / len(top_scores)
+        peak_score = max(percent_scores)
+        composite_score = (avg_top * 0.7) + (peak_score * 0.3)
+    else:
+        avg_top = 0.0
+        peak_score = 0.0
+        composite_score = 0.0
 
     return {
-        'similarity_score': int(round(max_score * 100)),
-        'top_matches': matches[:top_k]
+        'similarity_score': int(round(composite_score)),
+        'top_matches': top_matches,
+        'local_details': {
+            'average_top_matches': round(avg_top, 2),
+            'peak_match': round(peak_score, 2),
+            'evaluated_projects': len(percent_scores)
+        }
     }
 
 
 def _extract_first_numeric_score(payload):
-    """Recursively find a numeric score in nested JSON payload and normalize to percentage."""
+    """Find a numeric similarity score using known Winston-style keys only."""
+    preferred_keys = {
+        'score', 'similarity_score', 'similarity', 'plagiarism_score',
+        'overall_score', 'overall_similarity'
+    }
+
     if isinstance(payload, dict):
-        # Prefer common keys first
-        preferred_keys = [
-            'score', 'similarity_score', 'similarity', 'plagiarism_score',
-            'overall_score', 'overall_similarity'
-        ]
-        for key in preferred_keys:
-            if key in payload:
-                value = payload[key]
-                if isinstance(value, (int, float)):
-                    return float(value)
+        for key, value in payload.items():
+            if key in preferred_keys and isinstance(value, (int, float)):
+                return float(value)
         for value in payload.values():
             found = _extract_first_numeric_score(value)
             if found is not None:
@@ -501,8 +550,6 @@ def _extract_first_numeric_score(payload):
             found = _extract_first_numeric_score(item)
             if found is not None:
                 return found
-    elif isinstance(payload, (int, float)):
-        return float(payload)
     return None
 
 
@@ -542,9 +589,19 @@ def call_winston_similarity(input_text: str) -> dict:
         with urllib_request.urlopen(req, timeout=25) as resp:
             body = resp.read().decode('utf-8')
             parsed = json.loads(body) if body else {}
+            try:
+                if isinstance(parsed, dict):
+                    logger.warning("Winston debug: top-level keys=%s", list(parsed.keys()))
+                    logger.warning("Winston debug: raw preview=%s", json.dumps(parsed, ensure_ascii=True)[:800])
+                else:
+                    logger.warning("Winston debug: non-dict response type=%s", type(parsed))
+                    logger.warning("Winston debug: raw preview=%s", json.dumps(parsed, ensure_ascii=True)[:800])
+            except Exception:
+                logger.warning("Winston debug: failed to serialize response preview")
 
             score = _extract_first_numeric_score(parsed)
             if score is None:
+                logger.warning("Winston response missing similarity score keys. Top-level keys: %s", list(parsed.keys()) if isinstance(parsed, dict) else type(parsed))
                 return {'score': None, 'raw': parsed, 'error': 'Could not parse Winston score'}
 
             # Normalize 0-1 scores to 0-100

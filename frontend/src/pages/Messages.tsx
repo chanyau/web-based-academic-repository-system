@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef } from 'react';
-import { useParams, Link } from 'react-router-dom';
+import { useNavigate, useParams, Link } from 'react-router-dom';
 import { 
   MessageSquare, 
   Send, 
@@ -13,6 +13,7 @@ import { messageService, Message, Conversation } from '../services/messageServic
 
 export const Messages = () => {
   const { projectId } = useParams();
+  const navigate = useNavigate();
   const { user } = useAuth();
   const [conversations, setConversations] = useState<Conversation[]>([]);
   const [messages, setMessages] = useState<Message[]>([]);
@@ -62,7 +63,10 @@ export const Messages = () => {
   const loadMessages = async (projId: string) => {
     try {
       const data = await messageService.getMessages(projId);
-      setMessages(data);
+      const ordered = data
+        .slice()
+        .sort((a, b) => new Date(a.created_at).getTime() - new Date(b.created_at).getTime());
+      setMessages(ordered);
       
       // Find the conversation for display
       const selected = conversations.find(c => c.project_id.toString() === projId);
@@ -92,6 +96,17 @@ export const Messages = () => {
     } finally {
       setSending(false);
     }
+  };
+
+  const handleViewProject = () => {
+    if (!projectId) return;
+
+    if (user?.role === 'lecturer' && selectedProject?.project_status !== 'approved') {
+      navigate('/review');
+      return;
+    }
+
+    navigate(`/projects/${projectId}`);
   };
 
   const formatTime = (dateString: string) => {
@@ -239,13 +254,13 @@ export const Messages = () => {
                             : 'No participant assigned'}
                         </p>
                       </div>
-                      <Link 
-                        to={`/projects/${projectId}`}
+                      <button 
+                        onClick={handleViewProject}
                         className="flex items-center space-x-1 text-blue-600 hover:text-blue-700 text-sm"
                       >
                         <FileText className="h-4 w-4" />
                         <span>View Project</span>
-                      </Link>
+                      </button>
                     </div>
                   </div>
 
@@ -263,6 +278,27 @@ export const Messages = () => {
                       messages.map((msg) => {
                         const isOwnMessage = msg.sender.id === user?.id || 
                           (user?.id && msg.sender.id.toString() === user.id.toString());
+                        const isSystemNotification = msg.message_type === 'notification' || msg.message_type === 'system';
+                        
+                        if (isSystemNotification) {
+                          return (
+                            <div key={msg.id} className="flex justify-center my-4">
+                              <div className="max-w-md bg-blue-50 border border-blue-200 rounded-lg p-4 text-center">
+                                <div className="flex items-center justify-center space-x-2 mb-2">
+                                  <MessageSquare className="h-4 w-4 text-blue-600" />
+                                  <span className="text-xs text-blue-600 font-medium">System Notification</span>
+                                  <span className="text-xs text-blue-400">{formatTime(msg.created_at)}</span>
+                                </div>
+                                <p className="text-sm text-blue-900 whitespace-pre-wrap">{msg.content}</p>
+                                {msg.metadata?.stage && (
+                                  <div className="mt-2 text-xs text-blue-700">
+                                    Stage: {msg.metadata.stage}
+                                  </div>
+                                )}
+                              </div>
+                            </div>
+                          );
+                        }
                         
                         return (
                           <div

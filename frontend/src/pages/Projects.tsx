@@ -25,7 +25,15 @@ export const Projects = () => {
 			console.log('Loading approved projects...');
 			const projects = await projectService.getProjects({ status: 'approved' });
 			console.log('Loaded projects:', projects);
-			setProjects(projects || []);
+			const ordered = (projects || [])
+				.slice()
+				.sort((a, b) => {
+					const aTime = a.submittedAt ? new Date(a.submittedAt).getTime() : 0;
+					const bTime = b.submittedAt ? new Date(b.submittedAt).getTime() : 0;
+					if (bTime !== aTime) return bTime - aTime;
+					return (Number(b.id) || 0) - (Number(a.id) || 0);
+				});
+			setProjects(ordered);
 		} catch (err: any) {
 			console.error('Error loading projects:', err);
 			setError(err.message || 'Failed to load projects');

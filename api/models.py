@@ -42,6 +42,9 @@ class Project(models.Model):
     def authors_list(self):
         return [a.strip() for a in self.authors.split(',') if a.strip()]
 
+    class Meta:
+        ordering = ['-submitted_at', '-id']
+
 
 class Message(models.Model):
     """Chat messages between students and lecturers about a project"""

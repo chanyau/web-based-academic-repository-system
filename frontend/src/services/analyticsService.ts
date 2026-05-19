@@ -10,9 +10,28 @@ export interface AnalyticsOverview {
   by_role: Array<{ role: string; count: number }>;
 }
 
+export interface TrendTopic {
+  topic: string;
+  score: number;
+  downloads: number;
+  views: number;
+  citation_velocity: number;
+  projects_count: number;
+  recency_weight: number;
+}
+
+export interface TrendResponse {
+  topics: TrendTopic[];
+  generated_at: string;
+}
+
 export const analyticsService = {
   async getOverview(): Promise<AnalyticsOverview> {
     return apiClient.get<AnalyticsOverview>('/analytics/');
+  },
+
+  async getTrends(): Promise<TrendResponse> {
+    return apiClient.get<TrendResponse>('/analytics/trends/');
   },
 };
 

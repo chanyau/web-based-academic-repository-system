@@ -7,6 +7,8 @@ import base64
 import logging
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
+from email.mime.base import MIMEBase
+from email import encoders
 from pathlib import Path
 
 from google.oauth2.credentials import Credentials
@@ -78,7 +80,7 @@ def get_gmail_service():
         return None
 
 
-def create_message(to_email, subject, body, html_body=None):
+def create_message(to_email, subject, body, html_body=None, attachments=None):
     """
     Create an email message.
     
@@ -94,27 +96,38 @@ def create_message(to_email, subject, body, html_body=None):
     if isinstance(to_email, list):
         to_email = ', '.join(to_email)
     
+    message = MIMEMultipart('mixed')
+    message['to'] = to_email
+    message['subject'] = subject
+
+    alternative = MIMEMultipart('alternative')
+    alternative.attach(MIMEText(body, 'plain'))
     if html_body:
-        message = MIMEMultipart('alternative')
-        message['to'] = to_email
-        message['subject'] = subject
-        
-        # Attach plain text and HTML parts
-        part1 = MIMEText(body, 'plain')
-        part2 = MIMEText(html_body, 'html')
-        message.attach(part1)
-        message.attach(part2)
-    else:
-        message = MIMEText(body)
-        message['to'] = to_email
-        message['subject'] = subject
+        alternative.attach(MIMEText(html_body, 'html'))
+    message.attach(alternative)
+
+    if attachments:
+        for attachment in attachments:
+            filename = attachment.get('filename')
+            content = attachment.get('content')
+            mime_type = attachment.get('mime_type') or 'application/octet-stream'
+
+            if not filename or content is None:
+                continue
+
+            main_type, _, sub_type = mime_type.partition('/')
+            part = MIMEBase(main_type or 'application', sub_type or 'octet-stream')
+            part.set_payload(content)
+            encoders.encode_base64(part)
+            part.add_header('Content-Disposition', f'attachment; filename="{filename}"')
+            message.attach(part)
     
     # Encode the message
     raw_message = base64.urlsafe_b64encode(message.as_bytes()).decode('utf-8')
     return {'raw': raw_message}
 
 
-def send_gmail(to_email, subject, body, html_body=None):
+def send_gmail(to_email, subject, body, html_body=None, attachments=None):
     """
     Send an email using Gmail API.
     
@@ -133,7 +146,7 @@ def send_gmail(to_email, subject, body, html_body=None):
             logger.error("Could not get Gmail service. Email not sent.")
             return False
         
-        message = create_message(to_email, subject, body, html_body)
+        message = create_message(to_email, subject, body, html_body, attachments)
         
         # Send the message
         result = service.users().messages().send(

@@ -1,12 +1,33 @@
+import math
+from datetime import datetime, date
 from rest_framework import viewsets, permissions, status
+from rest_framework.exceptions import PermissionDenied
 from rest_framework.decorators import action, api_view, permission_classes
 from rest_framework.response import Response
 from django.contrib.auth import get_user_model
+from django.db import models
 from django.db.models import Q, Count
-from .models import Project, Message
-from .serializers import UserSerializer, ProjectSerializer, CustomTokenObtainPairSerializer, MessageSerializer
+from .models import (
+    Project,
+    Message,
+    ProjectStageSubmission,
+    ProjectStageSubmissionVersion,
+    ProjectDevelopmentSubmission,
+    InterimEvaluation,
+)
+from .serializers import (
+    UserSerializer,
+    ProjectSerializer,
+    CustomTokenObtainPairSerializer,
+    _assign_supervisor_round_robin,
+    MessageSerializer,
+    ProjectStageSubmissionSerializer,
+    ProjectDevelopmentSubmissionSerializer,
+    InterimEvaluationSerializer,
+    ProjectReviewSerializer,
+    WorkflowDetailsSerializer,
+)
 from rest_framework_simplejwt.views import TokenObtainPairView
-from datetime import datetime
 import os
 from django.conf import settings
 from django.core.mail import send_mail
@@ -14,18 +35,212 @@ from django.contrib.auth.password_validation import validate_password
 from django.contrib.auth.tokens import PasswordResetTokenGenerator
 from django.utils.http import urlsafe_base64_encode, urlsafe_base64_decode
 from django.utils.encoding import force_bytes, force_str
+from django.utils import timezone
 import logging
+import threading
+import base64
+import json
+import mimetypes
+import uuid
+from django.core.files.base import ContentFile
+from django.db import close_old_connections
+from urllib import request as urllib_request, error as urllib_error
 from .email_utils import (
     notify_project_submission,
     notify_project_approved,
     notify_project_rejected,
     notify_new_message,
     notify_project_under_review,
-    notify_admin_project_ready_for_review
+    notify_admin_project_ready_for_review,
+    notify_supervisor_plagiarism_report,
+    notify_stage_due_date,
+    notify_supervisor_message
 )
 
 User = get_user_model()
 logger = logging.getLogger(__name__)
+
+
+def _encode_multipart_formdata(fields, files):
+    boundary = uuid.uuid4().hex
+    body = bytearray()
+
+    for name, value in fields.items():
+        body.extend(f"--{boundary}\r\n".encode())
+        body.extend(f'Content-Disposition: form-data; name="{name}"\r\n\r\n'.encode())
+        body.extend(str(value).encode())
+        body.extend(b"\r\n")
+
+    for name, filename, content_type, content in files:
+        body.extend(f"--{boundary}\r\n".encode())
+        body.extend(
+            f'Content-Disposition: form-data; name="{name}"; filename="{filename}"\r\n'.encode()
+        )
+        body.extend(f"Content-Type: {content_type}\r\n\r\n".encode())
+        body.extend(content)
+        body.extend(b"\r\n")
+
+    body.extend(f"--{boundary}--\r\n".encode())
+    content_type = f"multipart/form-data; boundary={boundary}"
+    return bytes(body), content_type
+
+
+def _call_plagiarism_api(file_bytes, filename):
+    api_url = (os.getenv('PLAGIARISM_API_URL', '') or os.getenv('WINSTON_AI_API_URL', '')).strip()
+    api_key = (os.getenv('PLAGIARISM_API_KEY', '') or os.getenv('WINSTON_AI_API_KEY', '')).strip()
+    file_field = (os.getenv('PLAGIARISM_API_FILE_FIELD', '') or 'file').strip() or 'file'
+
+    if not api_url:
+        raise ValueError('PLAGIARISM_API_URL is not configured')
+
+    content_type = mimetypes.guess_type(filename)[0] or 'application/octet-stream'
+    body, multipart_type = _encode_multipart_formdata(
+        fields={},
+        files=[(file_field, filename, content_type, file_bytes)],
+    )
+
+    headers = {
+        'Content-Type': multipart_type,
+        'Accept': 'application/json',
+    }
+    if api_key:
+        headers['Authorization'] = f"Bearer {api_key}"
+
+    req = urllib_request.Request(api_url, data=body, headers=headers, method='POST')
+
+    try:
+        with urllib_request.urlopen(req, timeout=120) as response:
+            payload = response.read().decode('utf-8')
+            return json.loads(payload)
+    except urllib_error.HTTPError as http_err:
+        try:
+            error_payload = http_err.read().decode('utf-8')
+        except Exception:
+            error_payload = 'No error body returned.'
+        raise ValueError(f"Plagiarism API error: {http_err.code}. Body: {error_payload}")
+    except urllib_error.URLError as url_err:
+        raise ValueError(f"Plagiarism API unreachable: {url_err.reason}")
+
+
+def _run_plagiarism_check(project_id, stage_submission_id, file_path, filename):
+    close_old_connections()
+    try:
+        project = Project.objects.get(id=project_id)
+        stage_submission = ProjectStageSubmission.objects.get(id=stage_submission_id)
+
+        with open(file_path, 'rb') as handle:
+            file_bytes = handle.read()
+
+        api_result = _call_plagiarism_api(file_bytes, filename)
+        similarity, report_url, report_json, report_pdf_base64 = _extract_plagiarism_result(api_result)
+
+        if similarity is not None:
+            try:
+                project.similarity_score = int(round(float(similarity)))
+            except (TypeError, ValueError):
+                project.similarity_score = None
+
+        project.plagiarism_report_url = report_url or ''
+        project.plagiarism_report_json = report_json
+        project.plagiarism_checked_at = timezone.now()
+
+        report_content = None
+        if report_pdf_base64:
+            try:
+                report_content = base64.b64decode(report_pdf_base64)
+            except Exception:
+                report_content = None
+        if not report_content and report_url:
+            report_content = _fetch_report_file(report_url)
+        if report_content:
+            _attach_report_file(project, report_content, 'plagiarism_report.pdf')
+
+        project.status = 'plagiarism_completed'
+        project.workflow_status = 'plagiarism_completed'
+        if similarity is not None:
+            try:
+                if float(similarity) >= 30:
+                    project.workflow_status = 'plagiarism_flagged'
+                else:
+                    project.workflow_status = 'plagiarism_passed'
+            except (TypeError, ValueError):
+                project.workflow_status = 'plagiarism_completed'
+
+        project.save()
+
+        report_attachment = None
+        if report_content:
+            report_attachment = {
+                'filename': 'plagiarism_report.pdf',
+                'content': report_content,
+                'mime_type': 'application/pdf',
+            }
+        elif project.plagiarism_report_file:
+            try:
+                project.plagiarism_report_file.open('rb')
+                saved_report = project.plagiarism_report_file.read()
+                project.plagiarism_report_file.close()
+                report_attachment = {
+                    'filename': project.plagiarism_report_file.name.split('/')[-1] or 'plagiarism_report.pdf',
+                    'content': saved_report,
+                    'mime_type': 'application/pdf',
+                }
+            except Exception:
+                report_attachment = None
+
+        final_doc_attachment = None
+        if file_bytes:
+            final_doc_attachment = {
+                'filename': filename.split('/')[-1],
+                'content': file_bytes,
+                'mime_type': mimetypes.guess_type(filename)[0] or 'application/octet-stream',
+            }
+
+        notify_supervisor_plagiarism_report(
+            project,
+            similarity_score=project.similarity_score,
+            report_attachment=report_attachment,
+            final_doc_attachment=final_doc_attachment,
+        )
+    except Exception as exc:
+        logger.error(f"Plagiarism check failed for project {project_id}: {exc}")
+        try:
+            project = Project.objects.get(id=project_id)
+            project.plagiarism_checked_at = timezone.now()
+            project.status = 'plagiarism_checking'
+            project.workflow_status = 'plagiarism_checking'
+            project.save(update_fields=['plagiarism_checked_at', 'status', 'workflow_status'])
+        except Exception:
+            logger.error("Failed to update project after plagiarism failure.")
+
+
+def _extract_plagiarism_result(api_result):
+    similarity = api_result.get('similarity_score')
+    if similarity is None:
+        similarity = api_result.get('similarity_percentage')
+    report_url = api_result.get('report_url') or api_result.get('report_link')
+    report_json = api_result.get('report_json') or api_result.get('report') or api_result
+    report_pdf_base64 = api_result.get('report_pdf_base64') or api_result.get('report_file_base64')
+
+    return similarity, report_url, report_json, report_pdf_base64
+
+
+def _attach_report_file(project, report_content, filename):
+    if not report_content:
+        return
+
+    project.plagiarism_report_file.save(filename, ContentFile(report_content), save=False)
+
+
+def _fetch_report_file(report_url):
+    if not report_url:
+        return None
+
+    try:
+        with urllib_request.urlopen(report_url, timeout=60) as response:
+            return response.read()
+    except Exception:
+        return None
 
 class IsAdmin(permissions.BasePermission):
     def has_permission(self, request, view):
@@ -82,7 +297,7 @@ class ProjectViewSet(viewsets.ModelViewSet):
         if supervisor_id:
             queryset = queryset.filter(supervisor_id=supervisor_id)
             
-        return queryset.order_by('-submitted_at')
+        return queryset.order_by('-submitted_at', '-id')
     
     def retrieve(self, request, *args, **kwargs):
         """Get a single project and increment view count"""
@@ -94,7 +309,10 @@ class ProjectViewSet(viewsets.ModelViewSet):
         return Response(serializer.data)
 
     def perform_create(self, serializer):
-        project = serializer.save(owner=self.request.user, status='pending')
+        supervisor = serializer.validated_data.get('supervisor')
+        if not supervisor and getattr(self.request.user, 'supervisor_id', None):
+            supervisor = self.request.user.supervisor
+        project = serializer.save(owner=self.request.user, status='pending', supervisor=supervisor)
         # Send email notifications to student and supervisor
         try:
             notify_project_submission(project)
@@ -107,9 +325,9 @@ class ProjectViewSet(viewsets.ModelViewSet):
         if self.request.user.role == 'student':
             project = self.get_object()
             if project.owner != self.request.user:
-                raise permissions.PermissionDenied("You can only edit your own projects")
+                raise PermissionDenied("You can only edit your own projects")
             if project.status not in ['pending', 'revision_requested']:
-                raise permissions.PermissionDenied("You can only edit pending or revision-requested projects")
+                raise PermissionDenied("You can only edit pending or revision-requested projects")
         serializer.save()
 
     @action(detail=True, methods=['post'], permission_classes=[IsLecturerOrAdmin])
@@ -318,6 +536,312 @@ class ProjectViewSet(viewsets.ModelViewSet):
         project.save()
         return Response({'message': 'Download tracked', 'downloads': project.downloads})
 
+    @action(detail=True, methods=['get'], permission_classes=[permissions.IsAuthenticated], url_path='stage-progress')
+    def stage_progress(self, request, pk=None):
+        project = self.get_object()
+        submissions = ProjectStageSubmission.objects.filter(project=project).prefetch_related('versions', 'reviewed_by')
+        serializer = ProjectStageSubmissionSerializer(submissions, many=True, context={'request': request})
+        return Response(serializer.data)
+
+    @action(detail=True, methods=['post'], permission_classes=[permissions.IsAuthenticated], url_path='stage-submissions/(?P<stage>[^/.]+)')
+    def submit_stage(self, request, pk=None, stage=None):
+        project = self.get_object()
+        user = request.user
+
+        if user.role != 'student' or project.owner != user:
+            return Response({'error': 'Only the owning student can submit this stage.'}, status=403)
+
+        uploaded_file = request.FILES.get('file')
+        student_note = request.data.get('student_note', '')
+
+        if not uploaded_file:
+            return Response({'error': 'file is required'}, status=400)
+
+        stage_submission, _created = ProjectStageSubmission.objects.get_or_create(
+            project=project,
+            stage=stage,
+            defaults={'review_status': 'pending'},
+        )
+
+        # Create a new version
+        next_version = (stage_submission.versions.aggregate(models.Max('version')).get('version__max') or 0) + 1
+        version = ProjectStageSubmissionVersion.objects.create(
+            stage_submission=stage_submission,
+            version=next_version,
+            submitted_file=uploaded_file,
+            student_note=student_note,
+            review_status='pending',
+        )
+
+        # Update parent submission metadata
+        stage_submission.submitted_file = uploaded_file
+        stage_submission.student_note = student_note
+        stage_submission.review_status = 'pending'
+        stage_submission.submitted_at = timezone.now()
+        stage_submission.save(update_fields=['submitted_file', 'student_note', 'review_status', 'submitted_at'])
+
+        serializer = ProjectStageSubmissionSerializer(stage_submission, context={'request': request})
+        return Response(serializer.data, status=201)
+
+    @action(detail=True, methods=['post'], permission_classes=[IsLecturerOrAdmin], url_path='stage-submissions/(?P<stage>[^/.]+)/review')
+    def review_stage(self, request, pk=None, stage=None):
+        project = self.get_object()
+        user = request.user
+        stage_submission = ProjectStageSubmission.objects.filter(project=project, stage=stage).first()
+
+        if not stage_submission:
+            return Response({'error': 'Stage submission not found.'}, status=404)
+
+        review_status = request.data.get('review_status') or 'pending'
+        feedback = request.data.get('feedback', '')
+
+        if review_status not in ['approved', 'revision_requested', 'pending']:
+            return Response({'error': 'Invalid review_status'}, status=400)
+
+        stage_submission.supervisor_feedback = feedback
+        stage_submission.review_status = review_status
+        stage_submission.reviewed_by = user
+        stage_submission.reviewed_at = timezone.now()
+        stage_submission.save(update_fields=['supervisor_feedback', 'review_status', 'reviewed_by', 'reviewed_at'])
+
+        latest_version = stage_submission.versions.order_by('-version').first()
+        if latest_version:
+            latest_version.supervisor_feedback = feedback
+            latest_version.review_status = review_status if review_status != 'pending' else latest_version.review_status
+            latest_version.reviewed_at = timezone.now()
+            latest_version.reviewed_by = user
+            latest_version.save(update_fields=['supervisor_feedback', 'review_status', 'reviewed_at', 'reviewed_by'])
+
+        serializer = ProjectStageSubmissionSerializer(stage_submission, context={'request': request})
+        return Response(serializer.data)
+
+    @action(detail=True, methods=['post'], permission_classes=[permissions.IsAuthenticated], url_path='development-submissions')
+    def development_submission(self, request, pk=None):
+        project = self.get_object()
+        user = request.user
+
+        if user.role != 'student' or project.owner != user:
+            return Response({'error': 'Only the owning student can submit development updates.'}, status=403)
+
+        uploaded_file = request.FILES.get('file')
+        submission_type = request.data.get('submission_type') or 'progress_report'
+        comment = request.data.get('comment', '')
+
+        if not uploaded_file:
+            return Response({'error': 'file is required'}, status=400)
+
+        next_version = (
+            ProjectDevelopmentSubmission.objects.filter(project=project, submission_type=submission_type)
+            .aggregate(models.Max('version'))
+            .get('version__max')
+            or 0
+        ) + 1
+
+        submission = ProjectDevelopmentSubmission.objects.create(
+            project=project,
+            submitted_by=user,
+            submission_type=submission_type,
+            version=next_version,
+            file=uploaded_file,
+            comment=comment,
+        )
+
+        serializer = ProjectDevelopmentSubmissionSerializer(submission)
+        return Response(serializer.data, status=201)
+
+    @action(detail=True, methods=['post'], permission_classes=[permissions.IsAuthenticated], url_path='interim-evaluations')
+    def interim_evaluation(self, request, pk=None):
+        project = self.get_object()
+        user = request.user
+
+        if user.role != 'student' or project.owner != user:
+            return Response({'error': 'Only the owning student can submit interim evaluations.'}, status=403)
+
+        marks = request.data.get('marks')
+        comments = request.data.get('comments', '')
+
+        if marks is None:
+            return Response({'error': 'marks is required'}, status=400)
+
+        evaluation = InterimEvaluation.objects.create(
+            project=project,
+            evaluator=user,
+            marks=marks,
+            comments=comments,
+        )
+
+        serializer = InterimEvaluationSerializer(evaluation)
+        return Response(serializer.data, status=201)
+
+    @action(detail=True, methods=['post'], permission_classes=[permissions.IsAuthenticated], url_path='final-submission')
+    def final_submission(self, request, pk=None):
+        project = self.get_object()
+        user = request.user
+
+        if user.role != 'student' or project.owner != user:
+            return Response({'error': 'Only the owning student can submit the final package.'}, status=403)
+
+        final_report = request.FILES.get('final_report')
+        source_code = request.FILES.get('source_code')
+        supporting_docs = request.FILES.get('supporting_documents')
+        note = request.data.get('note', '')
+
+        if not final_report:
+            return Response({'error': 'final_report is required'}, status=400)
+
+        project.source_code_file = source_code or project.source_code_file
+        project.supporting_documents_file = supporting_docs or project.supporting_documents_file
+        project.save(update_fields=['source_code_file', 'supporting_documents_file'])
+
+        stage_submission, _ = ProjectStageSubmission.objects.get_or_create(
+            project=project,
+            stage='final_submission',
+            defaults={'review_status': 'pending'},
+        )
+
+        next_version = (stage_submission.versions.aggregate(models.Max('version')).get('version__max') or 0) + 1
+        ProjectStageSubmissionVersion.objects.create(
+            stage_submission=stage_submission,
+            version=next_version,
+            submitted_file=final_report,
+            student_note=note,
+            review_status='pending',
+        )
+
+        stage_submission.submitted_file = final_report
+        stage_submission.student_note = note
+        stage_submission.review_status = 'pending'
+        stage_submission.submitted_at = timezone.now()
+        stage_submission.save(update_fields=['submitted_file', 'student_note', 'review_status', 'submitted_at'])
+
+        serializer = ProjectStageSubmissionSerializer(stage_submission, context={'request': request})
+        return Response(serializer.data, status=201)
+
+    @action(detail=True, methods=['post'], permission_classes=[permissions.IsAuthenticated], url_path='final-document')
+    def final_document(self, request, pk=None):
+        project = self.get_object()
+        user = request.user
+
+        if user.role != 'student' or project.owner != user:
+            return Response({'error': 'Only the owning student can submit the final document.'}, status=403)
+
+        final_doc = request.FILES.get('file')
+        note = request.data.get('note', '')
+
+        if not final_doc:
+            return Response({'error': 'file is required'}, status=400)
+
+        project.status = 'plagiarism_checking'
+        project.workflow_status = 'plagiarism_checking'
+        project.save(update_fields=['status', 'workflow_status'])
+
+        stage_submission, _ = ProjectStageSubmission.objects.get_or_create(
+            project=project,
+            stage='final_document',
+            defaults={'review_status': 'pending'},
+        )
+
+        next_version = (stage_submission.versions.aggregate(models.Max('version')).get('version__max') or 0) + 1
+        ProjectStageSubmissionVersion.objects.create(
+            stage_submission=stage_submission,
+            version=next_version,
+            submitted_file=final_doc,
+            student_note=note,
+            review_status='pending',
+        )
+
+        stage_submission.submitted_file = final_doc
+        stage_submission.student_note = note
+        stage_submission.review_status = 'pending'
+        stage_submission.submitted_at = timezone.now()
+        stage_submission.save(update_fields=['submitted_file', 'student_note', 'review_status', 'submitted_at'])
+
+        try:
+            file_path = stage_submission.submitted_file.path
+            filename = stage_submission.submitted_file.name
+            worker = threading.Thread(
+                target=_run_plagiarism_check,
+                args=(project.id, stage_submission.id, file_path, filename),
+                daemon=True,
+            )
+            worker.start()
+        except Exception as exc:
+            logger.error(f"Failed to start plagiarism check for project {project.id}: {exc}")
+            return Response(
+                {
+                    'error': 'Plagiarism check could not be started. Please try again later.',
+                    'detail': str(exc),
+                },
+                status=502,
+            )
+
+        serializer = ProjectStageSubmissionSerializer(stage_submission, context={'request': request})
+        return Response(serializer.data, status=201)
+
+    @action(detail=True, methods=['post'], permission_classes=[IsAdmin], url_path='plagiarism-check')
+    def plagiarism_check(self, request, pk=None):
+        project = self.get_object()
+        user = request.user
+
+        if user.role != 'admin':
+            return Response({'error': 'Only admins can upload plagiarism reports.'}, status=403)
+
+        report_file = request.FILES.get('file')
+        similarity_score = request.data.get('similarity_score', None)
+        note = request.data.get('note', '')
+
+        if similarity_score is not None:
+            try:
+                project.similarity_score = int(round(float(similarity_score)))
+                project.save(update_fields=['similarity_score'])
+            except ValueError:
+                return Response({'error': 'similarity_score must be numeric'}, status=400)
+
+        if not report_file and similarity_score is None:
+            return Response({'error': 'Provide a report file or similarity_score.'}, status=400)
+
+        stage_submission, _ = ProjectStageSubmission.objects.get_or_create(
+            project=project,
+            stage='plagiarism_check',
+            defaults={'review_status': 'pending'},
+        )
+
+        next_version = (stage_submission.versions.aggregate(models.Max('version')).get('version__max') or 0) + 1
+        ProjectStageSubmissionVersion.objects.create(
+            stage_submission=stage_submission,
+            version=next_version,
+            submitted_file=report_file,
+            student_note=note,
+            review_status='pending',
+        )
+
+        stage_submission.submitted_file = report_file or stage_submission.submitted_file
+        stage_submission.student_note = note
+        stage_submission.review_status = 'pending'
+        stage_submission.submitted_at = timezone.now()
+        stage_submission.save(update_fields=['submitted_file', 'student_note', 'review_status', 'submitted_at'])
+
+        serializer = ProjectStageSubmissionSerializer(stage_submission, context={'request': request})
+        return Response(serializer.data, status=201)
+
+    @action(detail=True, methods=['get'], permission_classes=[permissions.IsAuthenticated], url_path='workflow')
+    def workflow_details(self, request, pk=None):
+        project = self.get_object()
+        stage_submissions = ProjectStageSubmission.objects.filter(project=project).prefetch_related('versions')
+        development_submissions = ProjectDevelopmentSubmission.objects.filter(project=project)
+        interim_evaluations = InterimEvaluation.objects.filter(project=project)
+        reviews = project.reviews.all()
+
+        payload = {
+            'project': project,
+            'reviews': reviews,
+            'development_submissions': development_submissions,
+            'interim_evaluations': interim_evaluations,
+            'stage_submissions': stage_submissions,
+        }
+        serializer = WorkflowDetailsSerializer(payload, context={'request': request})
+        return Response(serializer.data)
+
     @action(detail=True, methods=['get', 'post'])
     def messages(self, request, pk=None):
         """Get or send messages for a project"""
@@ -331,7 +855,7 @@ class ProjectViewSet(viewsets.ModelViewSet):
             return Response({'error': 'You can only access messages for projects you supervise'}, status=403)
         
         if request.method == 'GET':
-            messages = project.messages.all()
+            messages = project.messages.select_related('sender').order_by('created_at')
             # Mark messages as read for the current user (if they're the recipient)
             if user.role == 'student':
                 # Student reading - mark lecturer messages as read
@@ -357,7 +881,6 @@ class ProjectViewSet(viewsets.ModelViewSet):
             try:
                 notify_new_message(message)
             except Exception as e:
-                import logging
                 logging.getLogger(__name__).error(f"Failed to send message notification: {e}")
             serializer = MessageSerializer(message)
             return Response(serializer.data, status=201)
@@ -427,6 +950,85 @@ def analytics(request):
         'by_faculty': list(by_faculty),
         'by_status': list(by_status),
         'by_role': list(by_role),
+    })
+
+
+@api_view(['GET'])
+@permission_classes([permissions.AllowAny])
+def predictive_trends(request):
+    """Predict hot topics using downloads/views with recency-weighted velocity.
+
+    Falls back to type/faculty/department labels when keywords are missing so
+    the UI still shows movement even with sparse keyword data.
+    """
+    today = date.today()
+    topics = {}
+
+    projects = Project.objects.exclude(status='archived').values(
+        'keywords', 'downloads', 'views', 'submitted_at', 'type', 'faculty', 'department'
+    )
+
+    for project in projects:
+        raw_keywords = project.get('keywords') or ''
+        keyword_list = [k.strip().lower() for k in raw_keywords.split(',') if k.strip()]
+
+        # Fallback signals if keywords are empty
+        if not keyword_list:
+            fallback_labels = [
+                (project.get('type') or '').strip().lower(),
+                (project.get('faculty') or '').strip().lower(),
+                (project.get('department') or '').strip().lower(),
+            ]
+            keyword_list = [label for label in fallback_labels if label]
+
+        if not keyword_list:
+            continue
+
+        submitted_at = project.get('submitted_at') or today
+        age_days = max((today - submitted_at).days, 1)
+
+        downloads = project.get('downloads') or 0
+        views = project.get('views') or 0
+
+        # Add a small prior so zero-download projects still get a tiny signal
+        smoothed_downloads = downloads + 1
+        smoothed_views = views + 1
+
+        citation_velocity = smoothed_downloads / age_days  # proxy velocity
+
+        # Exponential decay so newer work counts more; ~60% weight at 1 year, ~13% at 2 years
+        recency_weight = math.exp(-age_days / 365)
+
+        base_score = (smoothed_downloads * 1.5) + (smoothed_views * 0.5) + (citation_velocity * 40)
+        score = base_score * recency_weight
+
+        for kw in keyword_list:
+            entry = topics.setdefault(kw, {
+                'topic': kw,
+                'score': 0.0,
+                'downloads': 0,
+                'views': 0,
+                'citation_velocity': 0.0,
+                'projects_count': 0,
+                'recency_weight': 0.0,
+            })
+            entry['score'] += score
+            entry['downloads'] += downloads
+            entry['views'] += views
+            entry['citation_velocity'] += citation_velocity
+            entry['projects_count'] += 1
+            entry['recency_weight'] = max(entry['recency_weight'], recency_weight)
+
+    # Normalize citation velocity by project count to avoid overstating repeated topics
+    for kw, data in topics.items():
+        if data['projects_count'] > 0:
+            data['citation_velocity'] = data['citation_velocity'] / data['projects_count']
+
+    top_topics = sorted(topics.values(), key=lambda x: x['score'], reverse=True)[:15]
+
+    return Response({
+        'topics': top_topics,
+        'generated_at': datetime.utcnow().isoformat() + 'Z'
     })
 
 
@@ -507,12 +1109,229 @@ def get_lecturers(request):
     
     return Response(data)
 
+
+@api_view(['GET'])
+@permission_classes([permissions.IsAuthenticated])
+def my_supervisees(request):
+    if request.user.role != 'lecturer':
+        return Response({'error': 'Only lecturers can access supervisees.'}, status=403)
+
+    students = (
+        User.objects.filter(role='student', supervisor=request.user)
+        .annotate(
+            project_count=Count('projects', distinct=True),
+            latest_submission=models.Max('projects__submitted_at'),
+        )
+        .order_by('first_name', 'last_name', 'username')
+    )
+
+    submitted = []
+    not_submitted = []
+
+    for student in students:
+        name = f"{student.first_name} {student.last_name}".strip() or student.username
+        entry = {
+            'id': student.id,
+            'name': name,
+            'email': student.email,
+            'faculty': student.faculty,
+            'department': student.department,
+            'project_count': student.project_count or 0,
+            'latest_submission': student.latest_submission.isoformat() if student.latest_submission else None,
+        }
+        if (student.project_count or 0) > 0:
+            submitted.append(entry)
+        else:
+            not_submitted.append(entry)
+
+    return Response({
+        'submitted': submitted,
+        'not_submitted': not_submitted,
+        'total': len(submitted) + len(not_submitted),
+    })
+
+
+@api_view(['POST'])
+@permission_classes([permissions.IsAuthenticated])
+def send_due_date_notification(request):
+    if request.user.role != 'lecturer':
+        return Response({'error': 'Only lecturers can send due date notifications.'}, status=403)
+
+    student_id = request.data.get('student_id')
+    project_id = request.data.get('project_id')
+    stage = request.data.get('stage')
+    due_date = request.data.get('due_date')
+    note = (request.data.get('note') or '').strip()
+
+    if not student_id or not project_id or not stage or not due_date:
+        return Response({'error': 'student_id, project_id, stage, and due_date are required.'}, status=400)
+
+    student = User.objects.filter(id=student_id, role='student', supervisor=request.user).first()
+    if not student:
+        return Response({'error': 'Student not found or not assigned to you.'}, status=404)
+
+    project = Project.objects.filter(id=project_id, owner=student, supervisor=request.user).first()
+    if not project:
+        return Response({'error': 'Project not found for this student.'}, status=404)
+
+    stage_label = dict(ProjectStageSubmission.STAGE_CHOICES).get(stage)
+    if not stage_label:
+        return Response({'error': 'Invalid stage.'}, status=400)
+
+    content_lines = [
+        f"Due date set for {stage_label}.",
+        f"Project: {project.title}",
+        f"Due date: {due_date}",
+    ]
+    if note:
+        content_lines.append(f"Note: {note}")
+
+    message = Message.objects.create(
+        project=project,
+        sender=request.user,
+        content="\n".join(content_lines),
+    )
+
+    notify_stage_due_date(student, request.user, project, stage_label, due_date, note or None)
+
+    return Response({'status': 'sent', 'message_id': message.id})
+
+
+@api_view(['POST'])
+@permission_classes([permissions.IsAuthenticated])
+def send_supervisor_message_notification(request):
+    if request.user.role != 'lecturer':
+        return Response({'error': 'Only lecturers can send supervisor messages.'}, status=403)
+
+    student_id = request.data.get('student_id')
+    project_id = request.data.get('project_id')
+    content = (request.data.get('content') or '').strip()
+
+    if not student_id or not project_id or not content:
+        return Response({'error': 'student_id, project_id, and content are required.'}, status=400)
+
+    student = User.objects.filter(id=student_id, role='student', supervisor=request.user).first()
+    if not student:
+        return Response({'error': 'Student not found or not assigned to you.'}, status=404)
+
+    project = Project.objects.filter(id=project_id, owner=student, supervisor=request.user).first()
+    if not project:
+        return Response({'error': 'Project not found for this student.'}, status=404)
+
+    message = Message.objects.create(
+        project=project,
+        sender=request.user,
+        content=content,
+    )
+
+    notify_supervisor_message(student, request.user, project, content)
+
+    return Response({'status': 'sent', 'message_id': message.id})
+
+
+def _build_stage_progress(project, request):
+    submissions = ProjectStageSubmission.objects.filter(project=project).prefetch_related('versions', 'reviewed_by')
+    submission_map = {submission.stage: submission for submission in submissions}
+    progress = []
+    stage_catalog = [
+        ('proposal', 'Proposal'),
+        ('chapter1', 'Chapter 1'),
+        ('chapter2', 'Chapter 2'),
+        ('chapter3', 'Chapter 3'),
+        ('final_document', 'Final Document'),
+    ]
+
+    for stage_code, stage_label in stage_catalog:
+        submission = submission_map.get(stage_code)
+        if submission:
+            progress.append(ProjectStageSubmissionSerializer(submission, context={'request': request}).data)
+            continue
+
+        progress.append({
+            'id': None,
+            'project': project.id,
+            'stage': stage_code,
+            'stageLabel': stage_label,
+            'submitted_file': None,
+            'fileUrl': None,
+            'student_note': '',
+            'supervisor_feedback': '',
+            'review_status': 'not_submitted',
+            'submitted_at': None,
+            'reviewed_at': None,
+            'reviewed_by': None,
+            'reviewedByName': None,
+            'versions': [],
+            'is_locked': False,
+            'lock_reason': None,
+        })
+
+    return progress
+
+
+@api_view(['GET'])
+@permission_classes([permissions.IsAuthenticated])
+def supervisee_details(request, student_id):
+    if request.user.role != 'lecturer':
+        return Response({'error': 'Only lecturers can access supervisee details.'}, status=403)
+
+    student = User.objects.filter(id=student_id, role='student', supervisor=request.user).first()
+    if not student:
+        return Response({'error': 'Supervisee not found.'}, status=404)
+
+    student_name = f"{student.first_name} {student.last_name}".strip() or student.username
+    supervisor = student.supervisor
+    supervisor_payload = None
+    if supervisor:
+        supervisor_payload = {
+            'id': supervisor.id,
+            'name': f"{supervisor.first_name} {supervisor.last_name}".strip() or supervisor.username,
+            'email': supervisor.email,
+            'faculty': supervisor.faculty,
+            'department': supervisor.department,
+        }
+
+    projects = Project.objects.filter(owner=student).order_by('-submitted_at', '-id')
+    project_payloads = []
+    for project in projects:
+        serialized_project = ProjectSerializer(project, context={'request': request}).data
+        stage_progress = _build_stage_progress(project, request)
+        total_stages = len(stage_progress)
+        submitted_count = len([stage for stage in stage_progress if stage.get('review_status') != 'not_submitted'])
+        completed_count = len([stage for stage in stage_progress if stage.get('review_status') == 'approved'])
+        pending_count = total_stages - completed_count
+        project_payloads.append({
+            **serialized_project,
+            'stage_progress': stage_progress,
+            'stage_summary': {
+                'total': total_stages,
+                'submitted': submitted_count,
+                'completed': completed_count,
+                'pending': pending_count,
+            },
+        })
+
+    return Response({
+        'student': {
+            'id': student.id,
+            'name': student_name,
+            'email': student.email,
+            'faculty': student.faculty,
+            'department': student.department,
+            'supervisor': supervisor_payload,
+        },
+        'projects': project_payloads,
+    })
+
 @api_view(['POST'])
 @permission_classes([permissions.AllowAny])
 def register(request):
     serializer = UserSerializer(data=request.data)
     if serializer.is_valid():
         user = serializer.save()
+        if user.role == 'student' and not user.supervisor_id:
+            _assign_supervisor_round_robin(user)
+            user.refresh_from_db(fields=['supervisor'])
         
         # Generate JWT tokens for the new user
         from rest_framework_simplejwt.tokens import RefreshToken
@@ -531,6 +1350,8 @@ def register(request):
                 'faculty': user.faculty,
                 'department': user.department,
                 'admitted': user.admitted,
+                'supervisorId': user.supervisor_id,
+                'supervisorName': f"{user.supervisor.first_name} {user.supervisor.last_name}".strip() if user.supervisor else None,
             }
         }, status=201)
     return Response(serializer.errors, status=400)
@@ -626,10 +1447,37 @@ def extract_keywords(request):
     title_text = (request.POST.get('title_text') or '').strip()
     
     if not uploaded_file:
-        return Response({
-            'error': 'Please upload a document to extract keywords',
-            'keywords': []
-        }, status=400)
+        fallback_text = "\n\n".join(part for part in [title_text, abstract_text] if part).strip()
+        if len(fallback_text) < 20:
+            return Response({
+                'error': 'Please upload a document or provide a longer title/abstract to extract keywords',
+                'keywords': []
+            }, status=400)
+
+        try:
+            from .nlp_utils import extract_keywords_simple
+
+            keywords = extract_keywords_simple(fallback_text, top_n=10)
+            if existing_keywords:
+                keywords = [k for k in keywords if k.lower() not in [e.lower() for e in existing_keywords]]
+
+            if not keywords:
+                return Response({
+                    'error': 'Could not extract meaningful keywords from the provided text.',
+                    'keywords': []
+                }, status=400)
+
+            return Response({
+                'keywords': keywords,
+                'message': 'Keywords extracted from title/abstract text',
+                'source': 'abstract'
+            })
+        except Exception as e:
+            logger.error(f"Error extracting keywords from text fallback: {e}")
+            return Response({
+                'error': f'Failed to extract keywords: {str(e)}',
+                'keywords': []
+            }, status=500)
     
     try:
         from .nlp_utils import extract_text_from_file, extract_keywords_simple
@@ -785,6 +1633,59 @@ def check_similarity(request):
             local_top_matches=report['top_matches']
         )
 
+        report_payload_url = None
+        report_payload_file_url = None
+
+        if uploaded_file and current_project_id and temp_file_path:
+            try:
+                project = Project.objects.get(id=current_project_id)
+                with open(temp_file_path, 'rb') as handle:
+                    file_bytes = handle.read()
+
+                api_result = _call_plagiarism_api(file_bytes, uploaded_file.name)
+                report_similarity, report_url, report_json, report_pdf_base64 = _extract_plagiarism_result(api_result)
+
+                report_content = None
+                if report_pdf_base64:
+                    try:
+                        report_content = base64.b64decode(report_pdf_base64)
+                    except Exception:
+                        report_content = None
+                if not report_content and report_url:
+                    report_content = _fetch_report_file(report_url)
+
+                if report_content:
+                    _attach_report_file(project, report_content, 'plagiarism_report.pdf')
+
+                if report_similarity is not None:
+                    try:
+                        project.similarity_score = int(round(float(report_similarity)))
+                    except (TypeError, ValueError):
+                        pass
+                else:
+                    try:
+                        project.similarity_score = int(round(float(hybrid_result['similarity_score'])))
+                    except (TypeError, ValueError):
+                        pass
+
+                if report_url:
+                    project.plagiarism_report_url = report_url
+                project.plagiarism_report_json = report_json
+                project.plagiarism_checked_at = timezone.now()
+                project.save(update_fields=[
+                    'similarity_score',
+                    'plagiarism_report_url',
+                    'plagiarism_report_json',
+                    'plagiarism_report_file',
+                    'plagiarism_checked_at',
+                ])
+
+                report_payload_url = project.plagiarism_report_url or None
+                if project.plagiarism_report_file:
+                    report_payload_file_url = project.plagiarism_report_file.url
+            except Exception as report_err:
+                logger.warning(f"Similarity report generation failed: {report_err}")
+
         return Response({
             'similarity_score': hybrid_result['similarity_score'],
             'top_matches': hybrid_result['top_matches'],
@@ -792,7 +1693,9 @@ def check_similarity(request):
             'components': hybrid_result['components'],
             'winston_status': 'used' if winston_result.get('score') is not None else 'fallback_local_only',
             'winston_error': winston_result.get('error'),
-            'message': 'Hybrid similarity check completed successfully' if hybrid_result['method'] == 'hybrid_local_winston' else 'Local similarity check completed (Winston unavailable)'
+            'message': 'Hybrid similarity check completed successfully' if hybrid_result['method'] == 'hybrid_local_winston' else 'Local similarity check completed (Winston unavailable)',
+            'report_url': report_payload_url,
+            'report_file_url': report_payload_file_url,
         })
 
     except Exception as e:

@@ -1,5 +1,5 @@
 import { Link, useLocation, useNavigate } from 'react-router-dom';
-import { BookOpen, Search, Upload, BarChart3, LogOut, User, Home, MessageSquare } from 'lucide-react';
+import { BookOpen, Search, Upload, BarChart3, LogOut, User, Home, MessageSquare, Users, Calendar } from 'lucide-react';
 import { useAuth } from '../context/AuthContext';
 import { useEffect, useState } from 'react';
 import { messageService } from '../services/messageService';
@@ -59,10 +59,12 @@ export const Navbar = () => {
                     <span>Dashboard</span>
                   </Link>
                 )}
-                <Link to="/projects" className="flex items-center space-x-1 text-blue-100 hover:text-white transition-colors">
-                  <Search className="h-4 w-4" />
-                  <span>Browse Projects</span>
-                </Link>
+                {user?.role !== 'admin' && (
+                  <Link to="/projects" className="flex items-center space-x-1 text-blue-100 hover:text-white transition-colors">
+                    <Search className="h-4 w-4" />
+                    <span>Browse Projects</span>
+                  </Link>
+                )}
                 {user?.role === 'student' && (
                   <Link to="/submit" className="flex items-center space-x-1 text-blue-100 hover:text-white transition-colors">
                     <Upload className="h-4 w-4" />
@@ -78,6 +80,18 @@ export const Navbar = () => {
                         {unreadCount > 99 ? '99+' : unreadCount}
                       </span>
                     )}
+                  </Link>
+                )}
+                {user?.role === 'lecturer' && (
+                  <Link to="/supervisees" className="flex items-center space-x-1 text-blue-100 hover:text-white transition-colors">
+                    <Users className="h-4 w-4" />
+                    <span>Supervisees</span>
+                  </Link>
+                )}
+                {user?.role === 'lecturer' && (
+                  <Link to="/supervisee-notifications" className="flex items-center space-x-1 text-blue-100 hover:text-white transition-colors">
+                    <Calendar className="h-4 w-4" />
+                    <span>Due Dates</span>
                   </Link>
                 )}
                 {user?.role === 'lecturer' && (

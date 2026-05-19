@@ -1,9 +1,12 @@
 import { useState, useEffect } from 'react';
-import { BarChart3, TrendingUp, Users, FileText, Eye, Clock } from 'lucide-react';
-import { analyticsService, AnalyticsOverview } from '../services/analyticsService';
+import { useNavigate } from 'react-router-dom';
+import { BarChart3, TrendingUp, Users, FileText, Eye, Clock, Flame } from 'lucide-react';
+import { analyticsService, AnalyticsOverview, TrendTopic } from '../services/analyticsService';
 
 export const Analytics = () => {
+  const navigate = useNavigate();
   const [analytics, setAnalytics] = useState<AnalyticsOverview | null>(null);
+  const [trends, setTrends] = useState<TrendTopic[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
@@ -12,8 +15,12 @@ export const Analytics = () => {
       try {
         setLoading(true);
         setError(null);
-        const data = await analyticsService.getOverview();
-        setAnalytics(data);
+        const [overviewData, trendData] = await Promise.all([
+          analyticsService.getOverview(),
+          analyticsService.getTrends(),
+        ]);
+        setAnalytics(overviewData);
+        setTrends(trendData.topics || []);
       } catch (err) {
         setError('Failed to load analytics. Please try again later.');
         console.error('Error fetching analytics:', err);
@@ -57,41 +64,57 @@ export const Analytics = () => {
         </div>
 
         <div className="grid md:grid-cols-2 lg:grid-cols-4 gap-6 mb-8">
-          <div className="bg-white rounded-xl shadow-lg p-6 border-l-4 border-blue-600">
+          <button
+            type="button"
+            onClick={() => navigate('/admin?tab=projects&view=overview')}
+            className="bg-white rounded-xl shadow-lg p-6 border-l-4 border-blue-600 text-left hover:shadow-xl transition-all"
+          >
             <div className="flex items-center justify-between mb-2">
               <FileText className="h-8 w-8 text-blue-600" />
               <span className="text-3xl font-bold text-blue-900">{analytics.total_projects}</span>
             </div>
             <p className="text-gray-600 text-sm">Total Projects</p>
-          </div>
+          </button>
 
-          <div className="bg-white rounded-xl shadow-lg p-6 border-l-4 border-green-600">
+          <button
+            type="button"
+            onClick={() => navigate('/admin?tab=projects&view=published')}
+            className="bg-white rounded-xl shadow-lg p-6 border-l-4 border-green-600 text-left hover:shadow-xl transition-all"
+          >
             <div className="flex items-center justify-between mb-2">
               <TrendingUp className="h-8 w-8 text-green-600" />
               <span className="text-3xl font-bold text-green-900">{analytics.approved}</span>
             </div>
             <p className="text-gray-600 text-sm">Approved Projects</p>
-          </div>
+          </button>
 
-          <div className="bg-white rounded-xl shadow-lg p-6 border-l-4 border-yellow-600">
+          <button
+            type="button"
+            onClick={() => navigate('/review?status=pending')}
+            className="bg-white rounded-xl shadow-lg p-6 border-l-4 border-yellow-600 text-left hover:shadow-xl transition-all"
+          >
             <div className="flex items-center justify-between mb-2">
               <Eye className="h-8 w-8 text-yellow-600" />
               <span className="text-3xl font-bold text-yellow-900">{analytics.pending_reviews}</span>
             </div>
             <p className="text-gray-600 text-sm">Pending Review</p>
-          </div>
+          </button>
 
-          <div className="bg-white rounded-xl shadow-lg p-6 border-l-4 border-purple-600">
+          <button
+            type="button"
+            onClick={() => navigate('/review?status=under_review')}
+            className="bg-white rounded-xl shadow-lg p-6 border-l-4 border-purple-600 text-left hover:shadow-xl transition-all"
+          >
             <div className="flex items-center justify-between mb-2">
               <Clock className="h-8 w-8 text-purple-600" />
               <span className="text-3xl font-bold text-purple-900">{analytics.under_review}</span>
             </div>
             <p className="text-gray-600 text-sm">Under Review</p>
-          </div>
+          </button>
         </div>
 
         <div className="grid lg:grid-cols-2 gap-8 mb-8">
-          <div className="bg-white rounded-xl shadow-lg p-6">
+          <div className="bg-white rounded-xl shadow-lg p-6 lg:col-span-2">
             <div className="flex items-center justify-between mb-6">
               <h2 className="text-xl font-bold text-gray-900 flex items-center space-x-2">
                 <BarChart3 className="h-5 w-5 text-blue-600" />
@@ -120,7 +143,7 @@ export const Analytics = () => {
             </div>
           </div>
 
-          <div className="bg-white rounded-xl shadow-lg p-6">
+          <div className="bg-white rounded-xl shadow-lg p-6 lg:col-span-2">
             <div className="flex items-center justify-between mb-6">
               <h2 className="text-xl font-bold text-gray-900 flex items-center space-x-2">
                 <Users className="h-5 w-5 text-blue-600" />
@@ -190,10 +213,10 @@ export const Analytics = () => {
 
             <div className="space-y-4">
               <div className="p-4 bg-green-50 rounded-lg border border-green-100">
-                <div className="flex items-center justify-between">
+                <div className="grid grid-cols-[1fr_auto] items-center gap-3">
                   <span className="text-sm text-gray-700">Approval Rate</span>
-                  <span className="text-lg font-bold text-green-600">
-                    {analytics.total_projects > 0 
+                  <span className="text-lg font-bold text-green-600 tabular-nums">
+                    {analytics.total_projects > 0
                       ? ((analytics.approved / analytics.total_projects) * 100).toFixed(1)
                       : 0}%
                   </span>
@@ -211,10 +234,10 @@ export const Analytics = () => {
               </div>
 
               <div className="p-4 bg-yellow-50 rounded-lg border border-yellow-100">
-                <div className="flex items-center justify-between">
+                <div className="grid grid-cols-[1fr_auto] items-center gap-3">
                   <span className="text-sm text-gray-700">Pending Rate</span>
-                  <span className="text-lg font-bold text-yellow-600">
-                    {analytics.total_projects > 0 
+                  <span className="text-lg font-bold text-yellow-600 tabular-nums">
+                    {analytics.total_projects > 0
                       ? ((analytics.pending_reviews / analytics.total_projects) * 100).toFixed(1)
                       : 0}%
                   </span>
@@ -232,10 +255,10 @@ export const Analytics = () => {
               </div>
 
               <div className="p-4 bg-blue-50 rounded-lg border border-blue-100">
-                <div className="flex items-center justify-between">
+                <div className="grid grid-cols-[1fr_auto] items-center gap-3">
                   <span className="text-sm text-gray-700">Review Rate</span>
-                  <span className="text-lg font-bold text-blue-600">
-                    {analytics.total_projects > 0 
+                  <span className="text-lg font-bold text-blue-600 tabular-nums">
+                    {analytics.total_projects > 0
                       ? ((analytics.under_review / analytics.total_projects) * 100).toFixed(1)
                       : 0}%
                   </span>
@@ -252,6 +275,53 @@ export const Analytics = () => {
                 </div>
               </div>
             </div>
+          </div>
+
+          <div className="bg-white rounded-xl shadow-lg p-6">
+            <div className="flex items-center justify-between mb-6">
+              <h2 className="text-xl font-bold text-gray-900 flex items-center space-x-2">
+                <Flame className="h-5 w-5 text-orange-500" />
+                <span>Predictive Trend Analysis</span>
+              </h2>
+              <div className="text-xs text-gray-500">AI-weighted downloads & recency</div>
+            </div>
+
+            {trends.length === 0 ? (
+              <p className="text-gray-600">Not enough data yet to surface hot topics.</p>
+            ) : (
+              <div className="space-y-3">
+                {trends.slice(0, 8).map((topic, index) => {
+                  const pct = Math.min(100, (topic.score / (trends[0]?.score || 1)) * 100);
+                  return (
+                    <div key={topic.topic} className="p-3 bg-orange-50 rounded-lg border border-orange-100 shadow-sm">
+                      <div className="flex items-center justify-between">
+                        <div className="flex items-center space-x-3">
+                          <div className="w-8 h-8 bg-orange-500 text-white rounded-full flex items-center justify-center text-sm font-bold">
+                            {index + 1}
+                          </div>
+                          <div>
+                            <div className="text-gray-900 font-semibold capitalize">{topic.topic}</div>
+                            <div className="text-xs text-gray-600">
+                              {topic.projects_count} projects • {topic.downloads} downloads • {topic.views} views
+                            </div>
+                          </div>
+                        </div>
+                        <div className="text-sm font-semibold text-orange-700">Score {topic.score.toFixed(1)}</div>
+                      </div>
+                      <div className="mt-3 w-full bg-orange-100 rounded-full h-2">
+                        <div
+                          className="bg-gradient-to-r from-orange-500 to-red-500 h-2 rounded-full"
+                          style={{ width: `${pct}%` }}
+                        ></div>
+                      </div>
+                      <div className="mt-2 text-xs text-gray-600">
+                        Velocity {topic.citation_velocity.toFixed(3)} /day · Recency weight {(topic.recency_weight * 100).toFixed(0)}%
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            )}
           </div>
         </div>
       </div>

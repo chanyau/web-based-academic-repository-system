@@ -17,6 +17,7 @@ backend/backend_project/.venv/
 
 # Credentials / keys
 credentials.json
+gmail_token.json
 *.pem
 *.key
 *.crt

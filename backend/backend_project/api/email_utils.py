@@ -6,6 +6,7 @@ Uses Gmail API for sending emails.
 from django.conf import settings
 import logging
 import os
+import mimetypes
 
 # Import Gmail service
 from .gmail_service import send_gmail
@@ -16,22 +17,39 @@ logger = logging.getLogger(__name__)
 USE_GMAIL_API = os.getenv('USE_GMAIL_API', 'true').strip().lower() in ('1', 'true', 'yes', 'on')
 
 
-def _send_via_smtp(to_email, subject, message, html_message=None):
-    from django.core.mail import send_mail
+def _send_via_smtp(to_email, subject, message, html_message=None, attachments=None):
+    from django.core.mail import EmailMultiAlternatives
 
-    send_mail(
+    if isinstance(to_email, str):
+        to_email = [to_email]
+
+    email = EmailMultiAlternatives(
         subject=subject,
-        message=message,
+        body=message,
         from_email=settings.DEFAULT_FROM_EMAIL,
-        recipient_list=to_email,
-        html_message=html_message,
-        fail_silently=False,
+        to=to_email,
     )
+
+    if html_message:
+        email.attach_alternative(html_message, 'text/html')
+
+    if attachments:
+        for attachment in attachments:
+            filename = attachment.get('filename')
+            content = attachment.get('content')
+            mime_type = attachment.get('mime_type') or 'application/octet-stream'
+
+            if not filename or content is None:
+                continue
+
+            email.attach(filename, content, mime_type)
+
+    email.send(fail_silently=False)
     logger.info(f"SMTP: Email sent successfully to {to_email}")
     return True
 
 
-def send_notification_email(to_email, subject, message, html_message=None):
+def send_notification_email(to_email, subject, message, html_message=None, attachments=None):
     """
     Send a notification email using Gmail API.
     
@@ -51,19 +69,62 @@ def send_notification_email(to_email, subject, message, html_message=None):
                 to_email=to_email,
                 subject=subject,
                 body=message,
-                html_body=html_message
+                html_body=html_message,
+                attachments=attachments,
             )
             if success:
                 logger.info(f"Gmail API: Email sent successfully to {to_email}")
                 return True
 
             logger.warning(f"Gmail API: Failed to send email to {to_email}. Falling back to SMTP.")
-            return _send_via_smtp(to_email, subject, message, html_message)
+            return _send_via_smtp(to_email, subject, message, html_message, attachments)
         else:
-            return _send_via_smtp(to_email, subject, message, html_message)
+            return _send_via_smtp(to_email, subject, message, html_message, attachments)
     except Exception as e:
         logger.error(f"Failed to send email to {to_email}: {e}")
         return False
+
+
+def notify_supervisor_plagiarism_report(project, similarity_score=None, report_attachment=None, final_doc_attachment=None):
+    supervisor = project.supervisor
+    student = project.owner
+
+    if not supervisor or not supervisor.email:
+        return
+
+    subject = f"Plagiarism Report Ready: {project.title}"
+    similarity_line = f"Similarity score: {similarity_score}%" if similarity_score is not None else "Similarity score: N/A"
+
+    message = f"""
+Dear {supervisor.first_name or supervisor.username},
+
+The plagiarism report for "{project.title}" is ready.
+
+Project Details:
+- Student: {student.first_name} {student.last_name} ({student.email})
+- Faculty: {project.faculty}
+- Department: {project.department}
+- Type: {project.type}
+- {similarity_line}
+
+The final document and the plagiarism report are attached to this email.
+
+Best regards,
+Academic Repository System
+    """.strip()
+
+    attachments = []
+    if report_attachment:
+        attachments.append(report_attachment)
+    if final_doc_attachment:
+        attachments.append(final_doc_attachment)
+
+    send_notification_email(
+        supervisor.email,
+        subject,
+        message,
+        attachments=attachments or None,
+    )
 
 
 def notify_project_submission(project):
@@ -212,6 +273,64 @@ Academic Repository System
         """.strip()
         
         send_notification_email(recipient.email, subject, msg_content)
+
+
+def notify_stage_due_date(student, supervisor, project, stage_label, due_date, note=None):
+    if not student or not student.email:
+        return False
+
+    supervisor_name = None
+    if supervisor:
+        supervisor_name = f"{supervisor.first_name} {supervisor.last_name}".strip() or supervisor.username
+
+    subject = f"Due Date Reminder: {stage_label}"
+    note_block = f"\nNote from your supervisor:\n{note}\n" if note else ""
+
+    message = f"""
+Dear {student.first_name or student.username},
+
+Your supervisor has set a due date for your project stage.
+
+Project: {project.title}
+Stage: {stage_label}
+Due date: {due_date}
+Supervisor: {supervisor_name or 'Supervisor'}
+{note_block}
+Please log in to the Academic Repository to submit your work before the due date.
+
+Best regards,
+Academic Repository System
+    """.strip()
+
+    return send_notification_email(student.email, subject, message)
+
+
+def notify_supervisor_message(student, supervisor, project, content):
+    if not student or not student.email:
+        return False
+
+    supervisor_name = None
+    if supervisor:
+        supervisor_name = f"{supervisor.first_name} {supervisor.last_name}".strip() or supervisor.username
+
+    subject = f"Message from your supervisor: {project.title}"
+    message = f"""
+Dear {student.first_name or student.username},
+
+You received a message from your supervisor regarding "{project.title}".
+
+Supervisor: {supervisor_name or 'Supervisor'}
+
+Message:
+{content}
+
+Please log in to the Academic Repository to reply if needed.
+
+Best regards,
+Academic Repository System
+    """.strip()
+
+    return send_notification_email(student.email, subject, message)
 
 
 def notify_project_under_review(project, feedback=None):
