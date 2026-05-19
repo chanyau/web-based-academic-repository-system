@@ -9,7 +9,14 @@ __pycache__/
 *.pyo
 *.pyd
 .venv/
+venv/
+env/
+ENV/
 backend/backend_project/.venv/
+backend/backend_project/venv/
+backend/backend_project/env/
+backend/backend_project/ENV/
+db.sqlite3
 *.sqlite3
 *.db
 *.sqlite
@@ -25,6 +32,8 @@ gmail_token.json
 # Node / Vite
 node_modules/
 *.local
+npm-debug.log*
+yarn-error.log
 
 # Build outputs
 /dist/
@@ -32,7 +41,12 @@ node_modules/
 
 # Media/uploads
 media/
+staticfiles/
 
 # OS files
 .DS_Store
 Thumbs.db
+
+# IDEs
+.vscode/
+.idea/
